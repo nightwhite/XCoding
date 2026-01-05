@@ -283,7 +283,7 @@ function createWindow(): BrowserWindow {
   return win;
 }
 
-// macOS 菜单显示名称 & 关于面板名称
+// macOS menu title & About panel title
 if (process.platform === "darwin") {
   try {
     app.setAboutPanelOptions({
