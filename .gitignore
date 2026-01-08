@@ -34,4 +34,5 @@ assets/codex/bin/**
 
 # Generated Claude Code bundle (do not commit)
 assets/claude-code/**
-!assets/claude-code/**/.gitkeep
+!assets/claude-code/.gitkeep
+!assets/claude-code/version.txt
