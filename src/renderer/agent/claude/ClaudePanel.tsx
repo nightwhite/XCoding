@@ -393,7 +393,7 @@ export default function ClaudePanel({ slot, projectRootPath, onOpenUrl, onOpenFi
         const normalized = ev && typeof ev === "object" && (ev as any).type === "stream_event" && (ev as any).event ? (ev as any).event : ev;
         const evType = normalized && typeof normalized === "object" ? String((normalized as any).type ?? "") : "";
         if (evType === "message_start" || evType === "tool_progress") setIsTurnInProgress(true);
-        if (evType === "result" || evType === "message_stop") setIsTurnInProgress(false);
+        if (evType === "result") setIsTurnInProgress(false);
         applyClaudeStreamEvent(storeRef.current, ev);
         shouldBump = true;
       }
