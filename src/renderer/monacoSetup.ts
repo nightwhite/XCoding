@@ -1,8 +1,14 @@
 import { loader } from "@monaco-editor/react";
 import * as monaco from "monaco-editor";
 
-export const MONACO_THEME_NAME = "xcoding-dark";
+export const MONACO_DARK_THEME_NAME = "xcoding-dark";
+export const MONACO_LIGHT_THEME_NAME = "xcoding-light";
+export const MONACO_CLASSIC_DARK_THEME_NAME = "xcoding-classic-dark";
 export const MONACO_URI_SCHEME = "xcoding";
+
+export function getMonacoThemeName(theme: "dark" | "light") {
+  return theme === "light" ? MONACO_LIGHT_THEME_NAME : MONACO_DARK_THEME_NAME;
+}
 
 // Configure @monaco-editor/react to use our monaco instance.
 loader.config({ monaco });
@@ -97,7 +103,7 @@ export function ensureMonacoLanguage(languageId: string) {
 }
 
 // Define a Monaco theme aligned with our VS Code-like CSS tokens in `src/renderer/styles.css`.
-monaco.editor.defineTheme(MONACO_THEME_NAME, {
+monaco.editor.defineTheme(MONACO_CLASSIC_DARK_THEME_NAME, {
   base: "vs-dark",
   inherit: true,
   rules: [
@@ -123,8 +129,55 @@ monaco.editor.defineTheme(MONACO_THEME_NAME, {
   }
 });
 
+monaco.editor.defineTheme(MONACO_DARK_THEME_NAME, {
+  base: "vs-dark",
+  inherit: true,
+  rules: [
+    { token: "diff.add", foreground: "89d185", background: "0f2a12" },
+    { token: "diff.delete", foreground: "f14c4c", background: "2a0f0f" },
+    { token: "diff.hunkHeader", foreground: "4fc1ff", fontStyle: "bold" },
+    { token: "diff.fileHeader", foreground: "569cd6", fontStyle: "bold" },
+    { token: "diff.patchHeader", foreground: "c586c0", fontStyle: "bold" },
+    { token: "diff.comment", foreground: "6a9955", fontStyle: "italic" },
+    { token: "diff.meta", foreground: "9d9d9d", fontStyle: "italic" },
+    { token: "diff.context", foreground: "cccccc" }
+  ],
+  colors: {
+    "editor.background": "#00000000", // Transparent to show Aurora background
+    "editor.foreground": "#cccccc",
+    "editorCursor.foreground": "#cccccc",
+    "editorLineNumber.foreground": "#9d9d9d",
+    "editorLineNumber.activeForeground": "#cccccc",
+    "editor.selectionBackground": "#094771",
+    "editor.lineHighlightBackground": "rgba(9, 71, 113, 0.2)", // Blueish to match selection
+    "editor.lineHighlightBorder": "#00000000",
+    "editor.selectionHighlightBackground": "rgba(59, 130, 246, 0.15)",
+    "editorIndentGuide.background": "#2a2a2a",
+    "editorIndentGuide.activeBackground": "#3c3c3c"
+  }
+});
+
+monaco.editor.defineTheme(MONACO_LIGHT_THEME_NAME, {
+  base: "vs",
+  inherit: true,
+  rules: [],
+  colors: {
+    "editor.background": "#00000000", // Transparent
+    "editor.foreground": "#1e293b", // Slate 800 - match CSS
+    "editorCursor.foreground": "#0f172a",
+    "editorLineNumber.foreground": "#64748b",
+    "editorLineNumber.activeForeground": "#0f172a",
+    "editor.selectionBackground": "rgba(59, 130, 246, 0.15)", // Blue-ish selection
+    "editor.lineHighlightBackground": "rgba(59, 130, 246, 0.1)", // Light Blueish
+    "editor.lineHighlightBorder": "#00000000",
+    "editor.selectionHighlightBackground": "rgba(59, 130, 246, 0.1)",
+    "editorIndentGuide.background": "rgba(0, 0, 0, 0.06)",
+    "editorIndentGuide.activeBackground": "rgba(0, 0, 0, 0.12)"
+  }
+});
+
 try {
-  monaco.editor.setTheme(MONACO_THEME_NAME);
+  monaco.editor.setTheme(MONACO_CLASSIC_DARK_THEME_NAME);
 } catch {
   // ignore
 }

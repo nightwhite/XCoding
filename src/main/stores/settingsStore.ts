@@ -1,10 +1,13 @@
 import { app } from "electron";
 import fs from "node:fs";
 import path from "node:path";
+import { DEFAULT_THEME_PACK_ID } from "../../shared/themePacks";
 
 export type AppSettings = {
   ui: {
     language: "en-US" | "zh-CN";
+    theme: "dark" | "light";
+    themePackId: string;
     layout?: { explorerWidth: number; chatWidth: number; isExplorerVisible: boolean; isChatVisible: boolean };
   };
   ai: {
@@ -19,8 +22,19 @@ export type AppSettings = {
 export type UiLayout = NonNullable<AppSettings["ui"]["layout"]>;
 
 export const settings: AppSettings = {
-  ui: { language: "en-US", layout: { explorerWidth: 180, chatWidth: 530, isExplorerVisible: true, isChatVisible: true } },
-  ai: { autoApplyAll: true, apiBase: "https://api.openai.com", apiKey: "", model: "gpt-4o-mini", codex: { prewarm: true } }
+  ui: {
+    language: "en-US",
+    theme: "dark",
+    themePackId: DEFAULT_THEME_PACK_ID,
+    layout: { explorerWidth: 180, chatWidth: 530, isExplorerVisible: true, isChatVisible: true }
+  },
+  ai: {
+    autoApplyAll: true,
+    apiBase: "https://api.openai.com",
+    apiKey: "",
+    model: "gpt-4o-mini",
+    codex: { prewarm: app.isPackaged }
+  }
 };
 
 export function settingsPath() {
@@ -31,7 +45,16 @@ export function loadSettingsFromDisk() {
   try {
     const raw = fs.readFileSync(settingsPath(), "utf8");
     const parsed = JSON.parse(raw) as Partial<AppSettings>;
+    let didMigrateThemePack = false;
     if (parsed.ui?.language === "en-US" || parsed.ui?.language === "zh-CN") settings.ui.language = parsed.ui.language;
+    if (parsed.ui?.theme === "dark" || parsed.ui?.theme === "light") settings.ui.theme = parsed.ui.theme;
+    if (typeof parsed.ui?.themePackId === "string" && parsed.ui.themePackId.trim()) {
+      settings.ui.themePackId = parsed.ui.themePackId.trim();
+    } else if (parsed.ui?.theme === "dark" || parsed.ui?.theme === "light") {
+      settings.ui.theme = "dark";
+      settings.ui.themePackId = DEFAULT_THEME_PACK_ID;
+      didMigrateThemePack = true;
+    }
     let didMigrateLayout = false;
     if (parsed.ui?.layout) {
       const l = parsed.ui.layout as any;
@@ -60,7 +83,7 @@ export function loadSettingsFromDisk() {
     if (typeof parsed.ai?.apiKey === "string") settings.ai.apiKey = parsed.ai.apiKey;
     if (typeof parsed.ai?.model === "string") settings.ai.model = parsed.ai.model;
     if (typeof parsed.ai?.codex?.prewarm === "boolean") settings.ai.codex.prewarm = parsed.ai.codex.prewarm;
-    if (didMigrateLayout) persistSettingsToDisk();
+    if (didMigrateLayout || didMigrateThemePack) persistSettingsToDisk();
   } catch {
     // ignore
   }
@@ -74,4 +97,3 @@ export function persistSettingsToDisk() {
     // ignore
   }
 }
-

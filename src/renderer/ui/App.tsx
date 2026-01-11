@@ -1,7 +1,9 @@
-import { type DragEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { type DragEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import ExplorerPanel from "./ExplorerPanel";
+import GitPanel from "./GitPanel";
 import AutoWorkspace from "./AutoWorkspace";
 import { I18nContext, type Language, messages } from "./i18n";
+import { UiThemeContext, type UiTheme } from "./UiThemeContext";
 import IdeaFlowModal from "./IdeaFlowModal";
 import IdeaWorkspace from "./IdeaWorkspace";
 import type { LayoutMode, PaneId, SplitIntent } from "./LayoutManager";
@@ -9,8 +11,14 @@ import NewProjectWizardModal from "./NewProjectWizardModal";
 import ProjectChatPanel from "./ProjectChatPanel";
 import ProjectSidebar from "./ProjectSidebar";
 import ProjectWorkspaceMain from "./ProjectWorkspaceMain";
+import AlertModal from "./AlertModal";
+import IdeSettingsModal from "./IdeSettingsModal";
 import type { TerminalPanelState } from "./TerminalPanel";
 import TitleBar from "./TitleBar";
+import { MONACO_CLASSIC_DARK_THEME_NAME } from "../monacoSetup";
+import { applyResolvedThemePack } from "./theme/applyTheme";
+import type { ResolvedThemePack, ThemePackSummary } from "./theme/types";
+import { DEFAULT_THEME_PACK_ID } from "../../shared/themePacks";
 import {
   getSlotProjectId,
   makeEmptySlotUiState,
@@ -37,8 +45,34 @@ function isMarkdownFilePath(relPath: string) {
   return lower.endsWith(".md") || lower.endsWith(".markdown") || lower.endsWith(".mdx");
 }
 
+function normalizeRelPath(input: string) {
+  return String(input ?? "").trim().replace(/^([/\\\\])+/, "").replace(/[\\\\]+/g, "/");
+}
+
+function makeFallbackResolvedThemePack(): ResolvedThemePack {
+  const id = DEFAULT_THEME_PACK_ID;
+  return {
+    id,
+    name: id,
+    appearance: "dark",
+    cssVars: {},
+    monacoThemeName: MONACO_CLASSIC_DARK_THEME_NAME,
+    extraCssText: ""
+  };
+}
+
 export default function App() {
   const [language, setLanguage] = useState<Language>("en-US");
+  const [theme, setTheme] = useState<UiTheme>("dark");
+  const [themePackId, setThemePackId] = useState(DEFAULT_THEME_PACK_ID);
+  const [themePacks, setThemePacks] = useState<ThemePackSummary[]>([]);
+  const [monacoThemeName, setMonacoThemeName] = useState(MONACO_CLASSIC_DARK_THEME_NAME);
+  const [alertMessage, setAlertMessage] = useState<string | null>(null);
+  const themeApplySeqRef = useRef(0);
+  const themePackIdRef = useRef(themePackId);
+  const lastSuccessfulResolvedThemePackRef = useRef<ResolvedThemePack>(makeFallbackResolvedThemePack());
+  const themePackPersistTimerRef = useRef<number | null>(null);
+  const pendingThemePackPersistIdRef = useRef<string | null>(null);
   const [activeProjectSlot, setActiveProjectSlot] = useState<number>(() => {
     try {
       const url = new URL(window.location.href);
@@ -66,7 +100,7 @@ export default function App() {
     isChatVisible: boolean;
     explorerWidth: number;
     chatWidth: number;
-  }>({ isExplorerVisible: true, isChatVisible: true, explorerWidth: 180, chatWidth: 530 });
+  }>({ isExplorerVisible: true, isChatVisible: true, explorerWidth: 180, chatWidth: 420 });
   const layoutRef = useRef(layout);
   const defaultUiLayoutRef = useRef<typeof layout | null>(null);
   const layoutPersistTimerRef = useRef<number | null>(null);
@@ -82,12 +116,106 @@ export default function App() {
     model: "gpt-4o-mini"
   });
 
+  useEffect(() => {
+    themePackIdRef.current = themePackId;
+  }, [themePackId]);
+
+  useEffect(() => {
+    return () => {
+      if (themePackPersistTimerRef.current != null) window.clearTimeout(themePackPersistTimerRef.current);
+    };
+  }, []);
+
+  function schedulePersistThemePackId(id: string) {
+    pendingThemePackPersistIdRef.current = id;
+    if (themePackPersistTimerRef.current != null) window.clearTimeout(themePackPersistTimerRef.current);
+    themePackPersistTimerRef.current = window.setTimeout(() => {
+      themePackPersistTimerRef.current = null;
+      const nextId = pendingThemePackPersistIdRef.current;
+      if (!nextId) return;
+      void window.xcoding.settings.setThemePack(nextId).catch((e) => {
+        if (import.meta.env.DEV) console.warn("settings.setThemePack failed", e);
+      });
+    }, 150);
+  }
+
+  const applyResolvedThemeToState = useCallback((resolved: ResolvedThemePack) => {
+    applyResolvedThemePack(resolved);
+    setTheme(resolved.appearance);
+    setMonacoThemeName(resolved.monacoThemeName);
+    setThemePackId(resolved.id);
+    themePackIdRef.current = resolved.id;
+    lastSuccessfulResolvedThemePackRef.current = resolved;
+  }, []);
+
+  function showAlert(message: string) {
+    setAlertMessage(message);
+  }
+
   async function setLanguageAndPersist(next: Language) {
     setLanguage(next);
     try {
       await window.xcoding.settings.setLanguage(next);
     } catch {
       // ignore
+    }
+  }
+
+  async function setThemePackAndPersist(nextId: string) {
+    const requestedId = String(nextId ?? "").trim();
+    if (!requestedId) return;
+
+    const applySeq = ++themeApplySeqRef.current;
+
+    try {
+      const resolved = await window.xcoding.themes.getResolved(requestedId);
+      if (applySeq !== themeApplySeqRef.current) return;
+
+      applyResolvedThemeToState(resolved);
+      schedulePersistThemePackId(resolved.id);
+    } catch (e) {
+      if (applySeq !== themeApplySeqRef.current) return;
+      if (import.meta.env.DEV) console.warn("themes.getResolved failed", e);
+      applyResolvedThemeToState(lastSuccessfulResolvedThemePackRef.current);
+      showAlert(t("themePackApplyFailed"));
+    }
+  }
+
+  async function openThemesDir() {
+    try {
+      await window.xcoding.themes.openDir();
+    } catch {
+      // ignore
+    }
+  }
+
+  async function importThemePackZip() {
+    try {
+      const res = await window.xcoding.themes.importZip();
+      if (res.ok) {
+        if ("canceled" in res) return;
+
+        const packs = await window.xcoding.themes.list();
+        setThemePacks(packs);
+
+        const importedId = res.themeId;
+        if (importedId === themePackIdRef.current) {
+          await setThemePackAndPersist(importedId);
+          return;
+        }
+
+        const importedName = packs.find((p) => p.id === importedId)?.name || importedId;
+        const displayName = importedName === importedId ? importedId : `${importedName} (${importedId})`;
+        const replacedHint = res.didReplace ? `\n\n${t("importThemePackDidReplace")}` : "";
+        const shouldSwitch = window.confirm(`${t("importThemePackSwitchConfirm")}${replacedHint}\n\n${displayName}`);
+        if (shouldSwitch) await setThemePackAndPersist(importedId);
+        return;
+      }
+
+      const extra = res.themeId ? ` (${res.themeId})` : "";
+      window.alert(`${t("importThemePackFailed")}\n\n${String(res.reason || "unknown")}${extra}`);
+    } catch {
+      window.alert(t("importThemePackFailed"));
     }
   }
 
@@ -117,6 +245,7 @@ export default function App() {
     return Object.fromEntries(entries) as Record<number, SlotUiState>;
   });
 
+  const [isIdeSettingsOpen, setIsIdeSettingsOpen] = useState(false);
   const [isProjectPickerOpen, setIsProjectPickerOpen] = useState(false);
   const [dragPreviewSlotOrder, setDragPreviewSlotOrder] = useState<number[] | null>(null);
   const [isDraggingTab, setIsDraggingTab] = useState(false);
@@ -141,10 +270,31 @@ export default function App() {
     layoutRef.current = layout;
   }, [layout]);
 
+  useLayoutEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    document.documentElement.style.colorScheme = theme;
+  }, [theme]);
+
   useEffect(() => {
     document.body.classList.toggle("xcoding-tab-dragging", isDraggingTab);
     return () => document.body.classList.remove("xcoding-tab-dragging");
   }, [isDraggingTab]);
+
+  useEffect(() => {
+    if (!isIdeSettingsOpen) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const packs = await window.xcoding.themes.list();
+        if (!cancelled) setThemePacks(packs);
+      } catch (e) {
+        if (import.meta.env.DEV) console.warn("themes.list failed", e);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isIdeSettingsOpen]);
 
   useEffect(() => {
     const onEnd = () => setIsDraggingTab(false);
@@ -183,6 +333,13 @@ export default function App() {
       if ((e as any).isComposing) return;
       const key = e.key.toLowerCase();
       const isMod = e.metaKey || e.ctrlKey;
+
+      if (isMod && !e.altKey && !e.shiftKey && key === ",") {
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent("xcoding:dismissOverlays"));
+        setIsIdeSettingsOpen((v) => !v);
+        return;
+      }
 
       const target = e.target as HTMLElement | null;
       const tag = target?.tagName?.toLowerCase() ?? "";
@@ -239,7 +396,14 @@ export default function App() {
   const activeProjectPath = activeProject?.path;
   const activeUi = slotUi[activeProjectSlot] ?? makeEmptySlotUiState();
   const activeWorkflowStage: WorkflowStage = activeUi.workflowUi?.stage ?? normalizeWorkflowStage(activeProject?.workflow?.stage);
-  const activeViewMode: "develop" | "preview" | null = activeWorkflowStage === "preview" ? "preview" : activeWorkflowStage === "develop" ? "develop" : null;
+  const activeViewMode: "develop" | "preview" | "review" | null =
+    activeWorkflowStage === "preview"
+      ? "preview"
+      : activeWorkflowStage === "review"
+        ? "review"
+        : activeWorkflowStage === "develop"
+          ? "develop"
+          : null;
   const isWorkflowPreview = activeWorkflowStage === "preview";
   const isActiveSlotBound = Boolean(activeProjectId);
   // 本期暂时隐藏内置 Chat（自研对话），保留 Claude Code（终端）与 Codex（app-server UI）。
@@ -462,7 +626,7 @@ export default function App() {
           return { ...s, panes: { ...s.panes, [pane]: { ...s.panes[pane], activeTabId: existingSameId.id } } };
         }
 
-        const next: AnyTab = { id: WORKFLOW_PREVIEW_TAB_ID, type: "preview", title: "Preview", url: "about:blank" };
+        const next: AnyTab = { id: WORKFLOW_PREVIEW_TAB_ID, type: "preview", title: "Preview", url: "about:blank", draftUrl: "about:blank" };
         return {
           ...s,
           activePane: pane,
@@ -472,46 +636,19 @@ export default function App() {
       return;
     }
 
-    // In develop/other stages, previews should not be visible at all.
-    // Best-effort cleanup: destroy any existing BrowserViews for preview tabs.
-    const currentUi = slotUiRef.current[slot];
-    if (currentUi) {
-      const previewIds = new Set<string>();
-      (["A", "B", "C"] as const).forEach((pane) => {
-        currentUi.panes[pane].tabs.forEach((tab) => {
-          if (tab.type === "preview") previewIds.add(tab.id);
-        });
-      });
-      previewIds.forEach((previewId) => void window.xcoding.preview.destroy({ previewId }));
-    }
-
     const saved = lastNonPreviewSelectionBySlotRef.current[slot];
     updateSlot(slot, (s) => {
       const panes: PaneId[] = ["A", "B", "C"];
       const findTab = (tabId: string) =>
         panes.find((pane) => s.panes[pane].tabs.some((t) => t.id === tabId)) ?? null;
 
-      // In develop/other stages, do not show any preview tabs at all.
-      let nextState: SlotUiState = s;
-      for (const pane of panes) {
-        const hasPreview = nextState.panes[pane].tabs.some((t) => t.type === "preview");
-        if (!hasPreview) continue;
-        const nextTabs = nextState.panes[pane].tabs.filter((t) => t.type !== "preview");
-        const nextActive =
-          nextTabs.some((t) => t.id === nextState.panes[pane].activeTabId) ? nextState.panes[pane].activeTabId : (nextTabs[0]?.id ?? "");
-        nextState = {
-          ...nextState,
-          panes: { ...nextState.panes, [pane]: { tabs: nextTabs, activeTabId: nextActive } }
-        };
-      }
-
       if (saved) {
         const pane = findTab(saved.tabId);
         if (pane) {
           return {
-            ...nextState,
+            ...s,
             activePane: pane,
-            panes: { ...nextState.panes, [pane]: { ...nextState.panes[pane], activeTabId: saved.tabId } }
+            panes: { ...s.panes, [pane]: { ...s.panes[pane], activeTabId: saved.tabId } }
           };
         }
         lastNonPreviewSelectionBySlotRef.current[slot] = null;
@@ -521,17 +658,17 @@ export default function App() {
         panes
           .map((pane) => ({
             pane,
-            tab: nextState.panes[pane].tabs.find((t) => t.type !== "preview") ?? null
+            tab: s.panes[pane].tabs.find((t) => t.type !== "preview") ?? null
           }))
           .find((x) => x.tab)?.tab ?? null;
-      if (!firstNonPreview) return nextState;
+      if (!firstNonPreview) return s;
 
       const pane = findTab(firstNonPreview.id);
-      if (!pane) return nextState;
+      if (!pane) return s;
       return {
-        ...nextState,
+        ...s,
         activePane: pane,
-        panes: { ...nextState.panes, [pane]: { ...nextState.panes[pane], activeTabId: firstNonPreview.id } }
+        panes: { ...s.panes, [pane]: { ...s.panes[pane], activeTabId: firstNonPreview.id } }
       };
     });
   }
@@ -634,10 +771,22 @@ export default function App() {
     }
   }
 
+  function disposeSlotPreviews(state: SlotUiState) {
+    (["A", "B", "C"] as const).forEach((pane) => {
+      state.panes[pane].tabs.forEach((tab) => {
+        if (tab.type !== "preview") return;
+        void window.xcoding.preview.destroy({ previewId: tab.id });
+      });
+    });
+  }
+
   function resetSlotUi(slot: number) {
     setSlotUi((prev) => {
       const existing = prev[slot];
-      if (existing) disposeSlotTerminals(existing);
+      if (existing) {
+        disposeSlotTerminals(existing);
+        disposeSlotPreviews(existing);
+      }
       return { ...prev, [slot]: makeEmptySlotUiState() };
     });
   }
@@ -658,11 +807,10 @@ export default function App() {
   const activePaneState = activeUi.panes[activeUi.activePane];
   const activePaneTab = activePaneState.tabs.find((t) => t.id === activePaneState.activeTabId) ?? activePaneState.tabs[0] ?? null;
   const activePreviewTab = activePaneTab && activePaneTab.type === "preview" ? activePaneTab : null;
-  const isPreviewFocus = Boolean(activePreviewTab && activeUi.previewUi?.mode === "preview");
   const effectiveLayout = {
     ...layout,
-    isExplorerVisible: isWorkflowPreview || isPreviewFocus ? false : layout.isExplorerVisible,
-    isChatVisible: isPreviewFocus ? false : layout.isChatVisible
+    isExplorerVisible: isWorkflowPreview ? false : layout.isExplorerVisible,
+    isChatVisible: layout.isChatVisible
   };
 
   function moveTabBetweenPanes(panes: SlotUiState["panes"], fromPane: PaneId, toPane: PaneId, tabId: string) {
@@ -700,39 +848,7 @@ export default function App() {
     if (existing && existing.slot !== activeProjectSlot) {
       exitPreviewFocus(existing, { restoreSelection: true });
     }
-
-    const current = previewFocusRef.current;
-    if (activePreviewTab) {
-      if (current && current.slot === activeProjectSlot) return;
-      const previewPane = activeUi.activePane;
-      previewFocusRef.current = {
-        slot: activeProjectSlot,
-        previewTabId: activePreviewTab.id,
-        prevLayoutMode: activeUi.layoutMode,
-        prevLayoutSplit: activeUi.layoutSplit,
-        prevActivePane: activeUi.activePane,
-        previewSourcePane: previewPane === "A" ? null : previewPane
-      };
-
-      updateSlot(activeProjectSlot, (s) => {
-        const activeId = activePreviewTab.id;
-        const fromPane =
-          (["A", "B", "C"] as const).find((p) => s.panes[p].tabs.some((t) => t.id === activeId)) ?? (previewPane as PaneId);
-        const moved = fromPane === "A" ? { ...s.panes, A: { ...s.panes.A, activeTabId: activeId } } : moveTabBetweenPanes(s.panes, fromPane, "A", activeId);
-        return {
-          ...s,
-          layoutMode: "1x1",
-          activePane: "A",
-          panes: moved
-        };
-      });
-      return;
-    }
-
-    if (current && current.slot === activeProjectSlot) {
-      exitPreviewFocus(current, { restoreSelection: false });
-    }
-  }, [activeProjectSlot, activePreviewTab?.id, activeUi.previewUi?.mode]);
+  }, [activeProjectSlot]);
 
   function persistLayout(next: typeof layout) {
     if (layoutPersistTimerRef.current != null) window.clearTimeout(layoutPersistTimerRef.current);
@@ -809,9 +925,9 @@ export default function App() {
         const slotsWithSameProject = (state.slots ?? []).filter((s) => String(s.projectId ?? "") && String(s.projectId ?? "") === openedProjectId).map((s) => Number(s.slot));
         const slotsWithSamePath = targetPathKey
           ? (state.slots ?? [])
-              .map((s) => ({ slot: Number(s.slot), projectId: String(s.projectId ?? "") }))
-              .filter((s) => s.projectId && normalizeProjectPath(String(state.projects?.[s.projectId]?.path ?? "")) === targetPathKey)
-              .map((s) => s.slot)
+            .map((s) => ({ slot: Number(s.slot), projectId: String(s.projectId ?? "") }))
+            .filter((s) => s.projectId && normalizeProjectPath(String(state.projects?.[s.projectId]?.path ?? "")) === targetPathKey)
+            .map((s) => s.slot)
           : [];
         const dupSlots = Array.from(new Set([...slotsWithSameProject, ...slotsWithSamePath])).filter((n) => Number.isFinite(n));
         if (dupSlots.length > 1) {
@@ -942,9 +1058,11 @@ export default function App() {
   }
 
   function openFile(relPath: string, line?: number, column?: number) {
+    const normalized = normalizeRelPath(relPath);
+    if (!normalized) return;
     updateSlot(activeProjectSlot, (s) => {
       const pane = s.activePane;
-      const existing = s.panes[pane].tabs.find((t) => t.type === "file" && "path" in t && t.path === relPath);
+      const existing = s.panes[pane].tabs.find((t) => t.type === "file" && "path" in t && t.path === normalized);
       const reveal = typeof line === "number" && line > 0 ? { line, column: typeof column === "number" && column > 0 ? column : 1, nonce: `${Date.now()}-${Math.random().toString(16).slice(2)}` } : undefined;
       if (existing) {
         return {
@@ -959,16 +1077,18 @@ export default function App() {
         };
       }
       const id = `tab-file-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-      const title = relPath.split("/").pop() ?? relPath;
-      const next: AnyTab = { id, type: "file", title, path: relPath, dirty: false, reveal };
+      const title = normalized.split("/").pop() ?? normalized;
+      const next: AnyTab = { id, type: "file", title, path: normalized, dirty: false, reveal };
       return { ...s, panes: { ...s.panes, [pane]: { tabs: [...s.panes[pane].tabs, next], activeTabId: id } } };
     });
   }
 
   function openFileInSlot(slot: number, relPath: string, line?: number, column?: number) {
+    const normalized = normalizeRelPath(relPath);
+    if (!normalized) return;
     updateSlot(slot, (s) => {
       const pane = s.activePane;
-      const existing = s.panes[pane].tabs.find((t) => t.type === "file" && "path" in t && t.path === relPath);
+      const existing = s.panes[pane].tabs.find((t) => t.type === "file" && "path" in t && t.path === normalized);
       const reveal =
         typeof line === "number" && line > 0
           ? { line, column: typeof column === "number" && column > 0 ? column : 1, nonce: `${Date.now()}-${Math.random().toString(16).slice(2)}` }
@@ -986,8 +1106,8 @@ export default function App() {
         };
       }
       const id = `tab-file-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-      const title = relPath.split("/").pop() ?? relPath;
-      const next: AnyTab = { id, type: "file", title, path: relPath, dirty: false, reveal };
+      const title = normalized.split("/").pop() ?? normalized;
+      const next: AnyTab = { id, type: "file", title, path: normalized, dirty: false, reveal };
       return { ...s, panes: { ...s.panes, [pane]: { tabs: [...s.panes[pane].tabs, next], activeTabId: id } } };
     });
   }
@@ -1005,9 +1125,22 @@ export default function App() {
 
   useEffect(() => {
     const handler = (e: Event) => {
-      const detail = (e as CustomEvent).detail as { title?: string; diff?: string; tabId?: string } | undefined;
+      const detail = (e as CustomEvent).detail as
+        | {
+            title?: string;
+            diff?: string;
+            tabId?: string;
+            reviewFiles?: Array<{ path: string; added: number; removed: number; kind?: string; diff: string }>;
+            threadId?: string;
+            turnId?: string;
+          }
+        | undefined;
+      const reviewFiles = Array.isArray(detail?.reviewFiles) ? detail!.reviewFiles! : null;
+      const threadId = typeof detail?.threadId === "string" ? detail.threadId.trim() : "";
+      const turnId = typeof detail?.turnId === "string" ? detail.turnId.trim() : "";
+      const useReviewTab = Boolean(reviewFiles?.length && threadId && turnId);
       const diff = typeof detail?.diff === "string" ? detail.diff : "";
-      if (!diff) return;
+      if (!reviewFiles?.length && !diff) return;
       const title = String(detail?.title ?? "Codex Diff");
       const stableId = typeof detail?.tabId === "string" && detail.tabId.trim() ? `tab-codex-diff:${detail.tabId.trim()}` : "";
       updateSlot(activeProjectSlot, (s) => {
@@ -1015,24 +1148,33 @@ export default function App() {
         if (stableId) {
           // Reuse the same tab for the same logical diff (e.g. "Review") instead of opening unlimited tabs.
           for (const p of ["A", "B", "C"] as const) {
-            const existing = s.panes[p].tabs.find((t) => t.type === "codexDiff" && t.id === stableId) ?? null;
-            if (existing) {
+            const existingIndex = s.panes[p].tabs.findIndex(
+              (t) => t.id === stableId && (t.type === "unifiedDiff" || t.type === "codexReviewDiff")
+            );
+            if (existingIndex >= 0) {
               const nextPanes: typeof s.panes = { ...s.panes };
+              const nextTab: AnyTab = useReviewTab
+                ? { id: stableId, type: "codexReviewDiff", title, threadId, turnId, files: reviewFiles! }
+                : { id: stableId, type: "unifiedDiff", title, diff, source: "codex" };
               // Update tab content in-place (copy-on-write for tabs array).
               nextPanes[p] = {
                 ...nextPanes[p],
-                tabs: nextPanes[p].tabs.map((t) => (t.type === "codexDiff" && t.id === stableId ? { ...t, title, diff } : t)),
+                tabs: nextPanes[p].tabs.map((t, idx) => (idx === existingIndex ? nextTab : t)),
                 activeTabId: stableId
               };
               return { ...s, panes: nextPanes, activePane: p };
             }
           }
-          const next: AnyTab = { id: stableId, type: "codexDiff", title, diff };
+          const next: AnyTab = useReviewTab
+            ? { id: stableId, type: "codexReviewDiff", title, threadId, turnId, files: reviewFiles! }
+            : { id: stableId, type: "unifiedDiff", title, diff, source: "codex" };
           return { ...s, panes: { ...s.panes, [pane]: { tabs: [...s.panes[pane].tabs, next], activeTabId: stableId } } };
         }
 
         const id = `tab-codex-diff-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-        const next: AnyTab = { id, type: "codexDiff", title, diff };
+        const next: AnyTab = useReviewTab
+          ? { id, type: "codexReviewDiff", title, threadId, turnId, files: reviewFiles! }
+          : { id, type: "unifiedDiff", title, diff, source: "codex" };
         return { ...s, panes: { ...s.panes, [pane]: { tabs: [...s.panes[pane].tabs, next], activeTabId: id } } };
       });
     };
@@ -1043,7 +1185,7 @@ export default function App() {
   function openNewPreview(url: string = "about:blank", title: string = "Preview") {
     if (activeProjectId) ensureProjectStage("preview");
     const id = `tab-preview-${Date.now()}`;
-    const next: AnyTab = { id, type: "preview", title: title || "Preview", url };
+    const next: AnyTab = { id, type: "preview", title: title || "Preview", url, draftUrl: url };
     updateSlot(activeProjectSlot, (s) => ({
       ...s,
       panes: { ...s.panes, [s.activePane]: { tabs: [...s.panes[s.activePane].tabs, next], activeTabId: id } }
@@ -1064,7 +1206,7 @@ export default function App() {
 
   function openAuxPreview(url: string, title: string) {
     const id = `tab-preview-${Date.now()}`;
-    const next: AnyTab = { id, type: "preview", title: title || "Preview", url };
+    const next: AnyTab = { id, type: "preview", title: title || "Preview", url, draftUrl: url };
     updateSlot(activeProjectSlot, (s) => ({
       ...s,
       panes: { ...s.panes, [s.activePane]: { tabs: [...s.panes[s.activePane].tabs, next], activeTabId: id } }
@@ -1119,7 +1261,41 @@ export default function App() {
     }));
   }
 
+  async function openGitDiff(path: string, mode: "working" | "staged") {
+    const relPath = String(path ?? "").replace(/^([/\\\\])+/, "").replace(/[\\\\]+/g, "/");
+    if (!relPath) return { ok: false as const, reason: "invalid_path" as const };
+    const stableId = `tab-git-diff:${mode}`;
+    const title = `Git Diff: ${relPath.split("/").pop() ?? relPath}${mode === "staged" ? " (staged)" : ""}`;
+
+    updateSlot(activeProjectSlot, (s) => {
+      // Keep a stable diff tab per mode, updating its content when selecting different files.
+      for (const p of ["A", "B", "C"] as const) {
+        const existing = s.panes[p].tabs.find((t) => t.type === "gitDiff" && t.id === stableId) ?? null;
+        if (existing) {
+          const nextPanes: typeof s.panes = { ...s.panes };
+          nextPanes[p] = {
+            ...nextPanes[p],
+            tabs: nextPanes[p].tabs.map((t) => (t.type === "gitDiff" && t.id === stableId ? { ...t, title, path: relPath, mode } : t)),
+            activeTabId: stableId
+          };
+          return { ...s, panes: nextPanes, activePane: p };
+        }
+      }
+
+      const pane = s.activePane;
+      const next: AnyTab = { id: stableId, type: "gitDiff", title, path: relPath, mode };
+      return { ...s, panes: { ...s.panes, [pane]: { tabs: [...s.panes[pane].tabs, next], activeTabId: stableId } } };
+    });
+
+    return { ok: true as const };
+  }
+
   function closeTab(pane: PaneId, tabId: string) {
+    const currentUi = slotUiRef.current[activeProjectSlot];
+    const closing = currentUi?.panes?.[pane]?.tabs.find((t) => t.id === tabId) ?? null;
+    if (closing?.type === "preview") {
+      void window.xcoding.preview.destroy({ previewId: tabId });
+    }
     updateSlot(activeProjectSlot, (s) => {
       const nextTabs = s.panes[pane].tabs.filter((t) => t.id !== tabId);
       const nextActive = s.panes[pane].activeTabId === tabId ? nextTabs[0]?.id ?? "" : s.panes[pane].activeTabId;
@@ -1171,7 +1347,19 @@ export default function App() {
   }
 
   useEffect(() => {
-    void window.xcoding.settings.get().then((s) => {
+    let cancelled = false;
+
+    void (async () => {
+      const applySeq = ++themeApplySeqRef.current;
+
+      let s: Awaited<ReturnType<typeof window.xcoding.settings.get>> | null = null;
+      try {
+        s = await window.xcoding.settings.get();
+      } catch (e) {
+        if (import.meta.env.DEV) console.warn("settings.get failed", e);
+      }
+      if (!s || cancelled || applySeq !== themeApplySeqRef.current) return;
+
       setLanguage(s.ui.language);
       setAutoApplyAll(s.ai.autoApplyAll);
       setAiConfig({ apiBase: s.ai.apiBase, apiKey: s.ai.apiKey, model: s.ai.model });
@@ -1179,7 +1367,38 @@ export default function App() {
         defaultUiLayoutRef.current = s.ui.layout;
         setLayout(s.ui.layout);
       }
-    });
+
+      const fallbackId = DEFAULT_THEME_PACK_ID;
+      const requestedId =
+        typeof s.ui.themePackId === "string" && s.ui.themePackId.trim() ? s.ui.themePackId.trim() : fallbackId;
+
+      let packs: ThemePackSummary[] = [];
+      try {
+        packs = await window.xcoding.themes.list();
+      } catch (e) {
+        if (import.meta.env.DEV) console.warn("themes.list failed", e);
+      }
+      if (cancelled || applySeq !== themeApplySeqRef.current) return;
+      if (packs.length) setThemePacks(packs);
+
+      const isAvailable = packs.length ? packs.some((p) => p.id === requestedId) : true;
+      const effectiveId = isAvailable ? requestedId : fallbackId;
+      setThemePackId(effectiveId);
+
+      try {
+        const resolved = await window.xcoding.themes.getResolved(effectiveId);
+        if (cancelled || applySeq !== themeApplySeqRef.current) return;
+        applyResolvedThemeToState(resolved);
+        if (resolved.id !== requestedId) schedulePersistThemePackId(resolved.id);
+      } catch (e) {
+        if (cancelled || applySeq !== themeApplySeqRef.current) return;
+        if (import.meta.env.DEV) console.warn("themes.getResolved failed", e);
+        showAlert(t("themePackLoadFailedFallback"));
+        applyResolvedThemeToState(makeFallbackResolvedThemePack());
+        if (fallbackId !== requestedId) schedulePersistThemePackId(fallbackId);
+      }
+    })();
+
     void window.xcoding.projects.get().then((res) => {
       if (!res.ok) return;
       setProjectsState(res.state as ProjectsState);
@@ -1246,6 +1465,7 @@ export default function App() {
     });
 
     return () => {
+      cancelled = true;
       disposeSwitch();
       disposeProjects();
       disposeDetached();
@@ -1253,6 +1473,16 @@ export default function App() {
       disposeStream();
     };
   }, []);
+
+  useEffect(() => {
+    if (!isIdeSettingsOpen) return;
+    void window.xcoding.themes
+      .list()
+      .then((packs) => setThemePacks(packs))
+      .catch(() => {
+        // ignore
+      });
+  }, [isIdeSettingsOpen]);
 
   useEffect(() => {
     // Bootstrap main-side watchers/services for the initial slot of this window.
@@ -1434,9 +1664,9 @@ export default function App() {
     }
   }
 
-  async function setProjectViewMode(mode: "develop" | "preview") {
+  async function setProjectViewMode(mode: "develop" | "preview" | "review") {
     if (!activeProjectId) return;
-    const stage: WorkflowStage = mode === "preview" ? "preview" : "develop";
+    const stage: WorkflowStage = mode === "preview" ? "preview" : mode === "review" ? "review" : "develop";
     persistSlotWorkflowStage(activeProjectSlot, activeProjectId, stage);
     appliedWorkflowStageBySlotRef.current[activeProjectSlot] = stage;
     updateSlot(activeProjectSlot, (s) => ({ ...s, workflowUi: { stage } }));
@@ -1470,303 +1700,383 @@ export default function App() {
 
   return (
     <I18nContext.Provider value={{ language, setLanguage, t }}>
-      <div className="h-full w-full bg-[var(--vscode-editor-background)] text-[var(--vscode-foreground)]">
-        <TitleBar
-          isExplorerVisible={effectiveLayout.isExplorerVisible}
-          isChatVisible={effectiveLayout.isChatVisible}
-          isTerminalVisible={Boolean(activeUi.terminalPanel?.isVisible && (activeUi.terminalPanel?.terminals?.length ?? 0) > 0)}
-          onToggleExplorer={() => setLayoutAndPersist((p) => ({ ...p, isExplorerVisible: !p.isExplorerVisible }))}
-          onToggleChat={() => setLayoutAndPersist((p) => ({ ...p, isChatVisible: !p.isChatVisible }))}
-          onToggleTerminal={() => toggleOrCreateTerminalPanel()}
-          centerTitle={activeProject?.name ?? ""}
-          viewMode={activeViewMode ?? undefined}
-          onViewModeChange={activeProjectId && activeViewMode ? ((mode) => void setProjectViewMode(mode)) : undefined}
-          showExplorerToggle={!isWorkflowPreview}
-          language={language}
-          onSetLanguage={(next) => void setLanguageAndPersist(next)}
-        />
-
-        <div className="flex h-[calc(100%-2.5rem)] min-h-0 w-full">
-          {/* Idea/Auto stages: minimal workspace (doc/chat) */}
-          {activeProjectId && (activeWorkflowStage === "idea" || activeWorkflowStage === "auto") ? (
-            <div className="flex min-h-0 flex-1">
-              <div className="min-h-0 flex-1">
-                {activeWorkflowStage === "idea" ? (
-                  <div className="flex h-full w-full items-center justify-center p-10 text-sm text-[var(--vscode-descriptionForeground)]">
-                    {t("ideaFlowInModalHint")}
-                  </div>
-                ) : (
-                  <AutoWorkspace
-                    slot={activeProjectSlot}
-                    activeRelPath={activeUi.autoFollow.activeRelPath}
-                    onTakeOver={() => void ensureProjectStage("develop")}
-                    chat={
-                      <ProjectChatPanel
-                        slot={activeProjectSlot}
-                        isVisible={true}
-                        width={360}
-                        onClose={() => {}}
-                        projectRootPath={activeProjectPath}
-                        terminalScrollback={terminalScrollback}
-                        onOpenUrl={(url) => openNewPreview(url)}
-                        onOpenImage={(url) => openImageTab(url)}
-                        onOpenFile={(relPath, line, column) => openFile(relPath, line, column)}
-                        allowedAgentViews={allowedAgentViews}
-                        agentView={allowedAgentViews.includes(activeUi.agentView) ? activeUi.agentView : "codex"}
-                        setAgentView={(next) => updateSlot(activeProjectSlot, (s) => ({ ...s, agentView: next }))}
-                        agentCli={activeUi.agentCli}
-                        updateAgentCli={(updater) => updateSlot(activeProjectSlot, (s) => ({ ...s, agentCli: updater(s.agentCli) }))}
-                        aiConfig={aiConfig}
-                        setAiConfig={setAiConfigAndPersist}
-                        autoApplyAll={autoApplyAll}
-                        setAutoApplyAll={setAutoApplyAllAndPersist}
-                        chatInput={activeUi.chatInput}
-                        setChatInput={(next) => updateSlot(activeProjectSlot, (s) => ({ ...s, chatInput: next }))}
-                        chatMessages={activeUi.chatMessages}
-                        activeRequestId={activeUi.activeChatRequestId}
-                        onSend={() => void sendChat()}
-                        onStop={() => void stopChat()}
-                        stagedFiles={activeUi.stagedFiles}
-                        onOpenDiff={(path) => openDiff(path)}
-                        onApplyAll={() => void applyAll()}
-                        onRevertLast={() => void revertLast()}
-                      />
-                    }
-                  />
-                )}
-              </div>
-            </div>
-          ) : (
-          <>
-	          <ProjectSidebar
-	            t={t}
-	            isSingleProjectWindow={isSingleProjectWindow}
-	            visualOrderedProjectSlots={visualOrderedProjectSlots}
-	            visibleProjectSlotsForWindow={visibleProjectSlotsForWindow}
-	            projectIndexBySlot={projectIndexBySlot}
-		            projectRowRefs={projectRowRefs}
-		            aiBySlot={aiBySlot}
-		            activeProjectSlot={activeProjectSlot}
-		            setActiveProjectSlot={(slot) => {
-		              setActiveProjectSlot(slot);
-		              void window.xcoding.projects.setActiveSlot(slot);
-		            }}
-		            onProjectContextMenuOpenNewWindow={(slot) => {
-		              void window.xcoding.window.create({ slot, mode: "single" });
-		              setDetachedSlots((prev) => {
-		                const next = new Set(prev);
-		                next.add(slot);
-		                return next;
-		              });
-		              if (slot === activeProjectSlot) {
-		                const remaining = visibleProjectSlotsForWindow.filter((x) => x.slot !== slot).map((x) => x.slot);
-		                const nextActive = remaining[0];
-		                if (typeof nextActive === "number") {
-		                  setActiveProjectSlot(nextActive);
-		                  void window.xcoding.projects.setActiveSlot(nextActive);
-		                }
-		              }
-		            }}
-		            onCloseProjectSlot={(slot) => void closeProjectSlot(slot)}
-		            onOpenProjectPicker={() => setIsProjectPickerOpen(true)}
-		            onDragStartProject={onDragStartProject}
-	            onDragEndProject={onDragEndProject}
-	            onDragOverProject={onDragOverProject}
-	            onDropProject={onDropProject}
-	          />
-
-          {effectiveLayout.isExplorerVisible ? (
-            <ExplorerPanel
-              slot={activeProjectSlot}
-              projectId={activeProjectId}
-              rootPath={activeProjectPath}
-              isBound={isActiveSlotBound}
-              width={layout.explorerWidth}
-              onOpenFolder={() => void openFolderIntoSlot(activeProjectSlot)}
-              onOpenFile={openFile}
-              onDeletedPaths={(paths) => {
-                updateSlot(activeProjectSlot, (s) => {
-                  const nextPanes: typeof s.panes = { ...s.panes };
-                  (Object.keys(nextPanes) as Array<keyof typeof nextPanes>).forEach((pane) => {
-                    const p = nextPanes[pane];
-                    const filtered = p.tabs.filter((t2) => {
-                      if (t2.type === "file" || t2.type === "diff") {
-                        return !paths.some((deleted) => (deleted.endsWith("/") ? t2.path.startsWith(deleted) : t2.path === deleted));
-                      }
-                      return true;
-                    });
-                    const activeStillExists = filtered.some((t2) => t2.id === p.activeTabId);
-                    nextPanes[pane] = { tabs: filtered, activeTabId: activeStillExists ? p.activeTabId : filtered[0]?.id ?? "" };
-                  });
-                  return { ...s, panes: nextPanes };
-                });
-              }}
-            />
-          ) : null}
-          {effectiveLayout.isExplorerVisible ? (
-            <div
-              className="h-full w-1 cursor-col-resize bg-transparent hover:bg-[var(--vscode-panel-border)]"
-              onMouseDown={(e) => startResize("explorer", e)}
-              role="separator"
-              aria-orientation="vertical"
-            />
-          ) : null}
-
-	          <ProjectWorkspaceMain
-	            t={t}
-	            activeProjectSlot={activeProjectSlot}
-	            activeProjectPath={activeProjectPath}
-	            isActiveSlotBound={isActiveSlotBound}
-	            recentProjects={recentProjects}
-	            openFolderIntoSlot={openFolderIntoSlot}
-	            bindProjectIntoSlot={bindProjectIntoSlot}
-	            activeUi={activeUi}
-	            setIsDraggingTab={setIsDraggingTab}
-            updateSlot={updateSlot}
-            closeTab={closeTab}
-            collapseEmptySplitPanes={collapseEmptySplitPanes}
-            openNewPreview={openNewPreview}
-            openFile={openFile}
-            openMarkdownPreview={openMarkdownPreview}
-            toggleOrCreateTerminalPanel={toggleOrCreateTerminalPanel}
-            showPanelTab={showPanelTab}
-            openUrlFromTerminal={openUrlFromTerminal}
-            terminalScrollback={terminalScrollback}
-            openPreviewIds={openPreviewIds}
-	            activePreviewTab={activePreviewTab}
-	          />
-
-	          {effectiveLayout.isChatVisible ? (
-	            <div
-	              className="group relative -ml-2 -mr-2 h-full w-4 shrink-0 cursor-col-resize bg-transparent"
-	              onMouseDown={(e) => startResize("chat", e)}
-	              role="separator"
-	              aria-orientation="vertical"
-	            >
-	              <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-transparent group-hover:bg-[var(--vscode-panel-border)]" />
-	            </div>
-	          ) : null}
-	
-	          <div
-	            className="relative h-full min-h-0 shrink-0"
-	            style={effectiveLayout.isChatVisible ? ({ width: layout.chatWidth } as React.CSSProperties) : ({ width: 0 } as React.CSSProperties)}
-	          >
-	            {projectsState.slotOrder.map((slotNum) => {
-	              const projectId = getSlotProjectId(projectsState, slotNum);
-	              const projectPath = projectId ? projectsState.projects[projectId]?.path : undefined;
-	              const ui = slotUi[slotNum] ?? makeEmptySlotUiState();
-	              const isVisible = effectiveLayout.isChatVisible && slotNum === activeProjectSlot;
-	              return (
-	                <div
-	                  key={slotNum}
-	                  className={[
-	                    "absolute inset-0",
-	                    isVisible ? "" : "pointer-events-none"
-	                  ].join(" ")}
-	                >
-	                  <ProjectChatPanel
-	                    slot={slotNum}
-	                    isVisible={isVisible}
-	                    onClose={() => setLayoutAndPersist((p) => ({ ...p, isChatVisible: false }))}
-	                    projectRootPath={projectPath}
-	                    terminalScrollback={terminalScrollback}
-	                    onOpenUrl={(url) => openNewPreview(url)}
-	                    onOpenImage={(url) => openImageTab(url)}
-	                    onOpenFile={(relPath, line, column) => openFileInSlot(slotNum, relPath, line, column)}
-	                    allowedAgentViews={allowedAgentViews}
-	                    agentView={ui.agentView}
-	                    setAgentView={(next) => updateSlot(slotNum, (s) => ({ ...s, agentView: next }))}
-	                    agentCli={ui.agentCli}
-	                    updateAgentCli={(updater) => updateSlot(slotNum, (s) => ({ ...s, agentCli: updater(s.agentCli) }))}
-	                    aiConfig={aiConfig}
-	                    setAiConfig={setAiConfigAndPersist}
-	                    autoApplyAll={autoApplyAll}
-	                    setAutoApplyAll={setAutoApplyAllAndPersist}
-	                    chatInput={ui.chatInput}
-	                    setChatInput={(next) => updateSlot(slotNum, (s) => ({ ...s, chatInput: next }))}
-	                    chatMessages={ui.chatMessages}
-	                    activeRequestId={ui.activeChatRequestId}
-	                    onSend={() => void sendChat()}
-	                    onStop={() => void stopChat()}
-	                    stagedFiles={ui.stagedFiles}
-	                    onOpenDiff={(path) => openDiff(path)}
-	                    onApplyAll={() => void applyAll()}
-	                    onRevertLast={() => void revertLast()}
-	                  />
-	                </div>
-	              );
-	            })}
-	          </div>
-
-          <NewProjectWizardModal
-            isOpen={isProjectPickerOpen}
-            projects={recentProjects}
-            onClose={() => setIsProjectPickerOpen(false)}
-            onOpenExisting={() => {
-              const target = pickTargetSlot(activeProjectSlot);
-              void openFolderIntoSlot(target).then(() => setIsProjectPickerOpen(false));
+	      <UiThemeContext.Provider value={{ theme, themePackId, monacoThemeName }}>
+	        <div
+	          className="flex h-full w-full flex-col bg-[var(--aurora-base)] text-[var(--vscode-foreground)]"
+	          style={{ backgroundImage: "var(--aurora-bg)" }}
+	        >
+          <TitleBar
+            isExplorerVisible={effectiveLayout.isExplorerVisible}
+            isChatVisible={effectiveLayout.isChatVisible}
+            isTerminalVisible={Boolean(activeUi.terminalPanel?.isVisible && (activeUi.terminalPanel?.terminals?.length ?? 0) > 0)}
+            onToggleExplorer={() => setLayoutAndPersist((p) => ({ ...p, isExplorerVisible: !p.isExplorerVisible }))}
+            onToggleChat={() => setLayoutAndPersist((p) => ({ ...p, isChatVisible: !p.isChatVisible }))}
+            onToggleTerminal={() => toggleOrCreateTerminalPanel()}
+            onOpenSettings={() => {
+              window.dispatchEvent(new CustomEvent("xcoding:dismissOverlays"));
+              setIsIdeSettingsOpen(true);
             }}
-            onPickRecent={(p) => {
-              const target = pickTargetSlot(activeProjectSlot);
-              void bindProjectIntoSlot(target, p.path).then(async (ok) => {
-                if (!ok) return;
-                // Existing projects default to develop.
-                const projectId = (await getBoundProjectIdFromMain(target)) ?? getSlotProjectId(projectsState, target) ?? null;
-                if (projectId) await window.xcoding.projects.setWorkflow(projectId, { stage: "develop" });
-                setIsProjectPickerOpen(false);
-              });
-            }}
+            centerTitle={activeProject?.name ?? ""}
+            viewMode={activeViewMode ?? undefined}
+            onViewModeChange={activeProjectId && activeViewMode ? ((mode) => void setProjectViewMode(mode)) : undefined}
+            showExplorerToggle={!isWorkflowPreview}
+            language={language}
+            onSetLanguage={(next) => void setLanguageAndPersist(next)}
           />
-          </>
-          )}
-        </div>
 
-	        <IdeaFlowModal
-	          isOpen={Boolean(!isProjectPickerOpen && activeProjectId && activeWorkflowStage === "idea")}
-	          projectName={activeProject?.name ?? ""}
-	          slot={activeProjectSlot}
-	          projectRootPath={activeProjectPath}
-	          docPath=".xcoding/idea.md"
-	          filesWritten={activeUi.ideaFlow?.writtenFiles ?? []}
-	          onClose={() => void ensureProjectStage("develop")}
-	          onStartAuto={() => void ensureProjectStage("auto")}
-	          onSkip={() => void ensureProjectStage("develop")}
-	          onOpenUrl={(url) => openNewPreview(url)}
-	          onOpenFile={(p) => openFile(p)}
-	          chat={
-	            <ProjectChatPanel
-	              slot={activeProjectSlot}
-	              isVisible={true}
-	              width={undefined}
-	              onClose={() => void ensureProjectStage("develop")}
-	              projectRootPath={activeProjectPath}
-	              terminalScrollback={terminalScrollback}
-	              onOpenUrl={(url) => openNewPreview(url)}
-	              onOpenImage={(url) => openImageTab(url)}
-	              onOpenFile={(relPath, line, column) => openFile(relPath, line, column)}
-	              allowedAgentViews={allowedAgentViews}
-	              agentView={activeUi.agentView}
-	              setAgentView={(next) => updateSlot(activeProjectSlot, (s) => ({ ...s, agentView: next }))}
-	              agentCli={activeUi.agentCli}
-	              updateAgentCli={(updater) => updateSlot(activeProjectSlot, (s) => ({ ...s, agentCli: updater(s.agentCli) }))}
-	              aiConfig={aiConfig}
-	              setAiConfig={setAiConfigAndPersist}
-	              autoApplyAll={autoApplyAll}
-	              setAutoApplyAll={setAutoApplyAllAndPersist}
-	              chatInput={activeUi.chatInput}
-	              setChatInput={(next) => updateSlot(activeProjectSlot, (s) => ({ ...s, chatInput: next }))}
-	              chatMessages={activeUi.chatMessages}
-	              activeRequestId={activeUi.activeChatRequestId}
-	              onSend={() => void sendChat()}
-	              onStop={() => void stopChat()}
-	              stagedFiles={activeUi.stagedFiles}
-	              onOpenDiff={(path) => openDiff(path)}
-	              onApplyAll={() => void applyAll()}
-	              onRevertLast={() => void revertLast()}
-	            />
-	          }
-	        />
-      </div>
+          <IdeSettingsModal
+            isOpen={isIdeSettingsOpen}
+            onClose={() => setIsIdeSettingsOpen(false)}
+            language={language}
+            onSetLanguage={(next) => void setLanguageAndPersist(next)}
+            themePackId={themePackId}
+            themePacks={themePacks}
+            onSetThemePackId={(next) => void setThemePackAndPersist(next)}
+            onOpenThemesDir={() => void openThemesDir()}
+            onImportThemePack={() => void importThemePackZip()}
+          />
+
+          <AlertModal
+            isOpen={alertMessage != null}
+            title={t("errors")}
+            message={alertMessage ?? ""}
+            onClose={() => setAlertMessage(null)}
+          />
+
+          <div className="flex min-h-0 w-full flex-1 overflow-hidden">
+            {/* Idea/Auto stages: minimal workspace (doc/chat) */}
+            {activeProjectId && (activeWorkflowStage === "idea" || activeWorkflowStage === "auto") ? (
+              <div className="flex min-h-0 flex-1 bg-editor-bg">
+                <div className="min-h-0 flex-1">
+                  {activeWorkflowStage === "idea" ? (
+                    <div className="flex h-full w-full items-center justify-center p-10 text-sm text-[var(--vscode-descriptionForeground)]">
+                      {t("ideaFlowInModalHint")}
+                    </div>
+                  ) : (
+                    <AutoWorkspace
+                      slot={activeProjectSlot}
+                      activeRelPath={activeUi.autoFollow.activeRelPath}
+                      onTakeOver={() => void ensureProjectStage("develop")}
+                      chat={
+                        <ProjectChatPanel
+                          slot={activeProjectSlot}
+                          isVisible={true}
+                          width={360}
+                          onClose={() => { }}
+                          projectRootPath={activeProjectPath}
+                          terminalScrollback={terminalScrollback}
+                          onOpenUrl={(url) => openNewPreview(url)}
+                          onOpenImage={(url) => openImageTab(url)}
+                          onOpenFile={(relPath, line, column) => openFile(relPath, line, column)}
+                          allowedAgentViews={allowedAgentViews}
+                          agentView={allowedAgentViews.includes(activeUi.agentView) ? activeUi.agentView : "codex"}
+                          setAgentView={(next) => updateSlot(activeProjectSlot, (s) => ({ ...s, agentView: next }))}
+                          agentCli={activeUi.agentCli}
+                          updateAgentCli={(updater) => updateSlot(activeProjectSlot, (s) => ({ ...s, agentCli: updater(s.agentCli) }))}
+                          aiConfig={aiConfig}
+                          setAiConfig={setAiConfigAndPersist}
+                          autoApplyAll={autoApplyAll}
+                          setAutoApplyAll={setAutoApplyAllAndPersist}
+                          chatInput={activeUi.chatInput}
+                          setChatInput={(next) => updateSlot(activeProjectSlot, (s) => ({ ...s, chatInput: next }))}
+                          chatMessages={activeUi.chatMessages}
+                          activeRequestId={activeUi.activeChatRequestId}
+                          onSend={() => void sendChat()}
+                          onStop={() => void stopChat()}
+                          stagedFiles={activeUi.stagedFiles}
+                          onOpenDiff={(path) => openDiff(path)}
+                          onApplyAll={() => void applyAll()}
+                          onRevertLast={() => void revertLast()}
+                        />
+                      }
+                    />
+                  )}
+                </div>
+              </div>
+            ) : (
+              <>
+                <div className="flex min-w-0 shrink-0 flex-col bg-glass-bg backdrop-blur-lg border-r border-glass-border">
+                  <ProjectSidebar
+                    t={t}
+                    isSingleProjectWindow={isSingleProjectWindow}
+                    visualOrderedProjectSlots={visualOrderedProjectSlots}
+                    visibleProjectSlotsForWindow={visibleProjectSlotsForWindow}
+                    projectIndexBySlot={projectIndexBySlot}
+                    projectRowRefs={projectRowRefs}
+                    aiBySlot={aiBySlot}
+                    activeProjectSlot={activeProjectSlot}
+                    setActiveProjectSlot={(slot) => {
+                      setActiveProjectSlot(slot);
+                      void window.xcoding.projects.setActiveSlot(slot);
+                    }}
+                    onProjectContextMenuOpenNewWindow={(slot) => {
+                      void window.xcoding.window.create({ slot, mode: "single" });
+                      setDetachedSlots((prev) => {
+                        const next = new Set(prev);
+                        next.add(slot);
+                        return next;
+                      });
+                      if (slot === activeProjectSlot) {
+                        const remaining = visibleProjectSlotsForWindow.filter((x) => x.slot !== slot).map((x) => x.slot);
+                        const nextActive = remaining[0];
+                        if (typeof nextActive === "number") {
+                          setActiveProjectSlot(nextActive);
+                          void window.xcoding.projects.setActiveSlot(nextActive);
+                        }
+                      }
+                    }}
+                    onCloseProjectSlot={(slot) => void closeProjectSlot(slot)}
+                    onOpenProjectPicker={() => setIsProjectPickerOpen(true)}
+                    onDragStartProject={onDragStartProject}
+                    onDragEndProject={onDragEndProject}
+                    onDragOverProject={onDragOverProject}
+                    onDropProject={onDropProject}
+                  />
+                </div>
+
+                {effectiveLayout.isExplorerVisible ? (
+                  <div className="flex min-w-0 shrink-0 flex-col bg-glass-bg backdrop-blur-lg border-r border-glass-border">
+                    {activeWorkflowStage === "review" ? (
+                      <GitPanel
+                        slot={activeProjectSlot}
+                        projectId={activeProjectId}
+                        rootPath={activeProjectPath}
+                        isBound={isActiveSlotBound}
+                        width={layout.explorerWidth}
+                        onOpenFolder={() => void openFolderIntoSlot(activeProjectSlot)}
+                        onOpenDiff={(relPath, mode) => void openGitDiff(relPath, mode)}
+                        onOpenFile={(relPath) => {
+                          ensureProjectStage("develop");
+                          openFile(relPath);
+                        }}
+                      />
+                    ) : (
+                      <ExplorerPanel
+                        slot={activeProjectSlot}
+                        projectId={activeProjectId}
+                        rootPath={activeProjectPath}
+                        isBound={isActiveSlotBound}
+                        width={layout.explorerWidth}
+                        onOpenFolder={() => void openFolderIntoSlot(activeProjectSlot)}
+                        onOpenFile={openFile}
+                        onOpenGitDiff={(relPath, mode) => void openGitDiff(relPath, mode)}
+                        onDeletedPaths={(paths) => {
+                          updateSlot(activeProjectSlot, (s) => {
+                            const nextPanes: typeof s.panes = { ...s.panes };
+                            (Object.keys(nextPanes) as Array<keyof typeof nextPanes>).forEach((pane) => {
+                              const p = nextPanes[pane];
+                              const filtered = p.tabs.filter((t2) => {
+                                if (t2.type === "file" || t2.type === "diff") {
+                                  return !paths.some((deleted) => (deleted.endsWith("/") ? t2.path.startsWith(deleted) : t2.path === deleted));
+                                }
+                                return true;
+                              });
+                              const activeStillExists = filtered.some((t2) => t2.id === p.activeTabId);
+                              nextPanes[pane] = { tabs: filtered, activeTabId: activeStillExists ? p.activeTabId : filtered[0]?.id ?? "" };
+                            });
+                            return { ...s, panes: nextPanes };
+                          });
+                        }}
+                      />
+                    )}
+                  </div>
+                ) : null}
+
+                {effectiveLayout.isExplorerVisible ? (
+
+                  <div
+
+                    className="relative z-10 w-0 shrink-0 cursor-col-resize before:absolute before:inset-y-0 before:-left-1 before:w-2 before:content-[''] before:bg-transparent before:transition-colors hover:before:bg-brand-primary/50"
+
+                    onMouseDown={(e) => startResize("explorer", e)}
+
+                    role="separator"
+
+                    aria-orientation="vertical"
+
+                  />
+
+                ) : null}
+
+
+
+                <div className="flex min-w-0 flex-1 flex-col bg-glass-bg-heavy backdrop-blur-lg shadow-inner">
+
+
+
+                  {/* ProjectWorkspaceMain */}
+
+
+
+                  <ProjectWorkspaceMain
+
+
+
+
+
+
+
+                    t={t}
+
+
+
+
+
+
+                    activeProjectSlot={activeProjectSlot}
+                    activeProjectPath={activeProjectPath}
+                    isActiveSlotBound={isActiveSlotBound}
+                    workflowStage={activeWorkflowStage}
+                    recentProjects={recentProjects}
+                    openFolderIntoSlot={openFolderIntoSlot}
+                    bindProjectIntoSlot={bindProjectIntoSlot}
+                    activeUi={activeUi}
+                    setIsDraggingTab={setIsDraggingTab}
+                    updateSlot={updateSlot}
+                    closeTab={closeTab}
+                    collapseEmptySplitPanes={collapseEmptySplitPanes}
+                    openNewPreview={openNewPreview}
+                    openFile={openFile}
+                    openMarkdownPreview={openMarkdownPreview}
+                    toggleOrCreateTerminalPanel={toggleOrCreateTerminalPanel}
+                    showPanelTab={showPanelTab}
+                    openUrlFromTerminal={openUrlFromTerminal}
+                    terminalScrollback={terminalScrollback}
+                    openPreviewIds={openPreviewIds}
+                    activePreviewTab={activePreviewTab}
+                  />
+                </div>
+
+                {effectiveLayout.isChatVisible ? (
+                  <div
+                    className="relative z-10 w-0 shrink-0 cursor-col-resize before:absolute before:inset-y-0 before:-left-1 before:w-2 before:content-[''] before:bg-transparent before:transition-colors hover:before:bg-brand-primary/50"
+                    onMouseDown={(e) => startResize("chat", e)}
+                    role="separator"
+                    aria-orientation="vertical"
+                  />
+                ) : null}
+
+                <div
+                  className="relative h-full min-h-0 shrink-0 bg-glass-bg backdrop-blur-lg border-l border-glass-border"
+                  style={effectiveLayout.isChatVisible ? ({ width: layout.chatWidth } as React.CSSProperties) : ({ width: 0 } as React.CSSProperties)}
+                >
+                  {projectsState.slotOrder.map((slotNum) => {
+                    const projectId = getSlotProjectId(projectsState, slotNum);
+                    const projectPath = projectId ? projectsState.projects[projectId]?.path : undefined;
+                    const ui = slotUi[slotNum] ?? makeEmptySlotUiState();
+                    const isVisible = effectiveLayout.isChatVisible && slotNum === activeProjectSlot;
+                    return (
+                      <div
+                        key={slotNum}
+                        className={[
+                          "absolute inset-0",
+                          isVisible ? "" : "pointer-events-none"
+                        ].join(" ")}
+                      >
+                        <ProjectChatPanel
+                          slot={slotNum}
+                          isVisible={isVisible}
+                          onClose={() => setLayoutAndPersist((p) => ({ ...p, isChatVisible: false }))}
+                          projectRootPath={projectPath}
+                          terminalScrollback={terminalScrollback}
+                          onOpenUrl={(url) => openNewPreview(url)}
+                          onOpenImage={(url) => openImageTab(url)}
+                          onOpenFile={(relPath, line, column) => openFileInSlot(slotNum, relPath, line, column)}
+                          allowedAgentViews={allowedAgentViews}
+                          agentView={ui.agentView}
+                          setAgentView={(next) => updateSlot(slotNum, (s) => ({ ...s, agentView: next }))}
+                          agentCli={ui.agentCli}
+                          updateAgentCli={(updater) => updateSlot(slotNum, (s) => ({ ...s, agentCli: updater(s.agentCli) }))}
+                          aiConfig={aiConfig}
+                          setAiConfig={setAiConfigAndPersist}
+                          autoApplyAll={autoApplyAll}
+                          setAutoApplyAll={setAutoApplyAllAndPersist}
+                          chatInput={ui.chatInput}
+                          setChatInput={(next) => updateSlot(slotNum, (s) => ({ ...s, chatInput: next }))}
+                          chatMessages={ui.chatMessages}
+                          activeRequestId={ui.activeChatRequestId}
+                          onSend={() => void sendChat()}
+                          onStop={() => void stopChat()}
+                          stagedFiles={ui.stagedFiles}
+                          onOpenDiff={(path) => openDiff(path)}
+                          onApplyAll={() => void applyAll()}
+                          onRevertLast={() => void revertLast()}
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <NewProjectWizardModal
+                  isOpen={isProjectPickerOpen}
+                  projects={recentProjects}
+                  onClose={() => setIsProjectPickerOpen(false)}
+                  onOpenExisting={() => {
+                    const target = pickTargetSlot(activeProjectSlot);
+                    void openFolderIntoSlot(target).then(() => setIsProjectPickerOpen(false));
+                  }}
+                  onPickRecent={(p) => {
+                    const target = pickTargetSlot(activeProjectSlot);
+                    void bindProjectIntoSlot(target, p.path).then(async (ok) => {
+                      if (!ok) return;
+                      // Existing projects default to develop.
+                      const projectId = (await getBoundProjectIdFromMain(target)) ?? getSlotProjectId(projectsState, target) ?? null;
+                      if (projectId) await window.xcoding.projects.setWorkflow(projectId, { stage: "develop" });
+                      setIsProjectPickerOpen(false);
+                    });
+                  }}
+                />
+              </>
+            )}
+          </div>
+
+          <IdeaFlowModal
+            isOpen={Boolean(!isProjectPickerOpen && activeProjectId && activeWorkflowStage === "idea")}
+            projectName={activeProject?.name ?? ""}
+            slot={activeProjectSlot}
+            projectRootPath={activeProjectPath}
+            docPath=".xcoding/idea.md"
+            filesWritten={activeUi.ideaFlow?.writtenFiles ?? []}
+            onClose={() => void ensureProjectStage("develop")}
+            onStartAuto={() => void ensureProjectStage("auto")}
+            onSkip={() => void ensureProjectStage("develop")}
+            onOpenUrl={(url) => openNewPreview(url)}
+            onOpenFile={(p) => openFile(p)}
+            chat={
+              <ProjectChatPanel
+                slot={activeProjectSlot}
+                isVisible={true}
+                width={undefined}
+                onClose={() => void ensureProjectStage("develop")}
+                projectRootPath={activeProjectPath}
+                terminalScrollback={terminalScrollback}
+                onOpenUrl={(url) => openNewPreview(url)}
+                onOpenImage={(url) => openImageTab(url)}
+                onOpenFile={(relPath, line, column) => openFile(relPath, line, column)}
+                allowedAgentViews={allowedAgentViews}
+                agentView={activeUi.agentView}
+                setAgentView={(next) => updateSlot(activeProjectSlot, (s) => ({ ...s, agentView: next }))}
+                agentCli={activeUi.agentCli}
+                updateAgentCli={(updater) => updateSlot(activeProjectSlot, (s) => ({ ...s, agentCli: updater(s.agentCli) }))}
+                aiConfig={aiConfig}
+                setAiConfig={setAiConfigAndPersist}
+                autoApplyAll={autoApplyAll}
+                setAutoApplyAll={setAutoApplyAllAndPersist}
+                chatInput={activeUi.chatInput}
+                setChatInput={(next) => updateSlot(activeProjectSlot, (s) => ({ ...s, chatInput: next }))}
+                chatMessages={activeUi.chatMessages}
+                activeRequestId={activeUi.activeChatRequestId}
+                onSend={() => void sendChat()}
+                onStop={() => void stopChat()}
+                stagedFiles={activeUi.stagedFiles}
+                onOpenDiff={(path) => openDiff(path)}
+                onApplyAll={() => void applyAll()}
+                onRevertLast={() => void revertLast()}
+              />
+            }
+          />
+        </div>
+      </UiThemeContext.Provider>
     </I18nContext.Provider>
   );
 }

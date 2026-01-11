@@ -2,12 +2,14 @@ import type { AppSettings } from "../stores/settingsStore";
 import { getProjectForSlot } from "../stores/projectsStore";
 import { sendToProjectService } from "../managers/projectServiceManager";
 import { registerAiIpc } from "./aiIpc";
+import { registerClaudeIpc } from "./claudeIpc";
 import { registerCodexIpc } from "./codexIpc";
 import { registerPreviewIpc } from "./previewIpc";
 import { registerProjectIpc } from "./projectIpc";
 import { registerProjectsIpc } from "./projectsIpc";
 import { registerSettingsIpc } from "./settingsIpc";
 import { registerTerminalIpc } from "./terminalIpc";
+import { registerThemesIpc } from "./themesIpc";
 import { registerWindowIpc } from "./windowIpc";
 
 export function setupIpc({
@@ -22,14 +24,15 @@ export function setupIpc({
   setActiveSlotForWindow: (windowId: number, slot: number) => Promise<void>;
 }) {
   registerSettingsIpc({ onLanguageChanged });
+  registerThemesIpc();
   registerWindowIpc({ devServerUrl, onLastWindowClosed, setActiveSlotForWindow });
 
   registerProjectsIpc({ setActiveSlotForWindow });
   registerProjectIpc();
 
   registerAiIpc({ getProjectForSlot, sendToProjectService });
+  registerClaudeIpc();
   registerCodexIpc();
   registerTerminalIpc({ getProjectForSlot });
   registerPreviewIpc();
 }
-

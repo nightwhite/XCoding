@@ -38,8 +38,9 @@ import {
   type WorkspaceWritePolicy
 } from "./panel/types";
 
-export default function CodexPanel({ slot, projectRootPath, onOpenUrl, onOpenImage }: Props) {
+export default function CodexPanel({ slot, projectRootPath, onOpenUrl, onOpenImage, isActive }: Props) {
   const { t } = useI18n();
+  const isPanelActive = isActive !== false;
   const [isHistoryOpen, setIsHistoryOpen] = useState(true);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isDiffPanelOpen, setIsDiffPanelOpen] = useState(false);
@@ -264,6 +265,7 @@ export default function CodexPanel({ slot, projectRootPath, onOpenUrl, onOpenIma
   useCodexBridge({ storeRef, bump, setStatusState, handleNotification, scheduledRafRef });
 
   useEffect(() => {
+    if (!isPanelActive) return;
     if (!projectRootPath) return;
     void (async () => {
       const startRes = await window.xcoding.codex.ensureStarted();
@@ -289,11 +291,12 @@ export default function CodexPanel({ slot, projectRootPath, onOpenUrl, onOpenIma
         void openThread(persisted);
       }
     })();
-  }, [activeThreadStorageKey, projectRootPath]);
+  }, [activeThreadStorageKey, isPanelActive, projectRootPath]);
 
   // On hard refresh, status can stay `idle` for a moment while the projectRootPath is already set.
   // Auto-trigger startup so the UI doesn't look "broken" just because it's between boot steps.
   useEffect(() => {
+    if (!isPanelActive) return;
     if (!projectRootPath) return;
     if (statusState !== "idle") return;
     void (async () => {
@@ -303,7 +306,7 @@ export default function CodexPanel({ slot, projectRootPath, onOpenUrl, onOpenIma
         await refreshThreads();
       }
     })();
-  }, [projectRootPath, statusState]);
+  }, [isPanelActive, projectRootPath, statusState]);
 
   const { refreshConfigAndModels } = useMemo(() => {
     return createCodexConfigActions({
@@ -506,7 +509,10 @@ export default function CodexPanel({ slot, projectRootPath, onOpenUrl, onOpenIma
   const closeHistory = useCallback(() => setIsHistoryOpen(false), []);
   const toggleHistory = useCallback(() => setIsHistoryOpen((v) => !v), []);
   const toggleDiffPanel = useCallback(() => setIsDiffPanelOpen((v) => !v), []);
-  const openSettings = useCallback(() => setIsSettingsOpen(true), []);
+  const openSettings = useCallback(() => {
+    window.dispatchEvent(new CustomEvent("xcoding:dismissOverlays"));
+    setIsSettingsOpen(true);
+  }, []);
 
   return (
     <div className="relative flex h-full min-h-0 flex-col">
@@ -636,7 +642,7 @@ export default function CodexPanel({ slot, projectRootPath, onOpenUrl, onOpenIma
             }
           })();
         }}
-        onOpenSettings={() => setIsSettingsOpen(true)}
+        onOpenSettings={openSettings}
         attachments={attachments}
         onRemoveAttachment={(id) => setAttachments((prev) => prev.filter((x) => x.id !== id))}
         onAddFileAttachment={async (file) => {

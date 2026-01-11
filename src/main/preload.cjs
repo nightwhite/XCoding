@@ -18,8 +18,15 @@ contextBridge.exposeInMainWorld("xcoding", {
     show: (payload) => ipcRenderer.invoke("preview:show", payload),
     hide: (payload) => ipcRenderer.invoke("preview:hide", payload),
     navigate: (payload) => ipcRenderer.invoke("preview:navigate", payload),
+    reload: (payload) => ipcRenderer.invoke("preview:reload", payload),
     destroy: (payload) => ipcRenderer.invoke("preview:destroy", payload),
     setBounds: (payload) => ipcRenderer.invoke("preview:setBounds", payload),
+    setPreserveLog: (payload) => ipcRenderer.invoke("preview:setPreserveLog", payload),
+    setEmulation: (payload) => ipcRenderer.invoke("preview:setEmulation", payload),
+    networkGetEntry: (payload) => ipcRenderer.invoke("preview:networkGetEntry", payload),
+    networkGetResponseBody: (payload) => ipcRenderer.invoke("preview:networkGetResponseBody", payload),
+    networkBuildCurl: (payload) => ipcRenderer.invoke("preview:networkBuildCurl", payload),
+    networkClearBrowserCache: (payload) => ipcRenderer.invoke("preview:networkClearBrowserCache", payload),
     onConsole: (listener) => {
       const wrapped = (_event, payload) => listener(payload);
       ipcRenderer.on("preview:console", wrapped);
@@ -29,6 +36,11 @@ contextBridge.exposeInMainWorld("xcoding", {
       const wrapped = (_event, payload) => listener(payload);
       ipcRenderer.on("preview:network", wrapped);
       return () => ipcRenderer.off("preview:network", wrapped);
+    },
+    onResetLogs: (listener) => {
+      const wrapped = (_event, payload) => listener(payload);
+      ipcRenderer.on("preview:resetLogs", wrapped);
+      return () => ipcRenderer.off("preview:resetLogs", wrapped);
     }
   },
   projects: {
@@ -109,6 +121,7 @@ contextBridge.exposeInMainWorld("xcoding", {
     restart: () => ipcRenderer.invoke("codex:restart"),
     turnRevert: (payload) => ipcRenderer.invoke("codex:turnRevert", payload),
     turnApply: (payload) => ipcRenderer.invoke("codex:turnApply", payload),
+    turnFileDiff: (payload) => ipcRenderer.invoke("codex:turnFileDiff", payload),
     respond: (payload) => ipcRenderer.invoke("codex:respond", payload),
     sessionRead: (payload) => ipcRenderer.invoke("codex:sessionRead", payload),
     writeImageAttachment: (payload) => ipcRenderer.invoke("codex:writeImageAttachment", payload),
@@ -124,12 +137,46 @@ contextBridge.exposeInMainWorld("xcoding", {
       return () => ipcRenderer.off("codex:request", wrapped);
     }
   },
+  claude: {
+    ensureStarted: (payload) => ipcRenderer.invoke("claude:ensureStarted", payload),
+    getStatus: (payload) => ipcRenderer.invoke("claude:getStatus", payload),
+    sendUserMessage: (payload) => ipcRenderer.invoke("claude:sendUserMessage", payload),
+    interrupt: (payload) => ipcRenderer.invoke("claude:interrupt", payload),
+    close: (payload) => ipcRenderer.invoke("claude:close", payload),
+    setPermissionMode: (payload) => ipcRenderer.invoke("claude:setPermissionMode", payload),
+    respondToolPermission: (payload) => ipcRenderer.invoke("claude:respondToolPermission", payload),
+    historyList: (payload) => ipcRenderer.invoke("claude:historyList", payload),
+    sessionRead: (payload) => ipcRenderer.invoke("claude:sessionRead", payload),
+    turnFileDiff: (payload) => ipcRenderer.invoke("claude:turnFileDiff", payload),
+    mcpServerStatus: (payload) => ipcRenderer.invoke("claude:mcpServerStatus", payload),
+    forkSession: (payload) => ipcRenderer.invoke("claude:forkSession", payload),
+    latestSnapshotFiles: (payload) => ipcRenderer.invoke("claude:latestSnapshotFiles", payload),
+    revertFileFromBackup: (payload) => ipcRenderer.invoke("claude:revertFileFromBackup", payload),
+    onEvent: (listener) => {
+      const wrapped = (_event, payload) => listener(payload);
+      ipcRenderer.on("claude:event", wrapped);
+      return () => ipcRenderer.off("claude:event", wrapped);
+    },
+    onRequest: (listener) => {
+      const wrapped = (_event, payload) => listener(payload);
+      ipcRenderer.on("claude:request", wrapped);
+      return () => ipcRenderer.off("claude:request", wrapped);
+    }
+  },
   project: {
     readFile: (payload) => ipcRenderer.invoke("project:fsReadFile", payload),
     writeFile: (payload) => ipcRenderer.invoke("project:fsWriteFile", payload),
     listDir: (payload) => ipcRenderer.invoke("project:fsListDir", payload),
     searchPaths: (payload) => ipcRenderer.invoke("project:searchPaths", payload),
     gitStatus: (payload) => ipcRenderer.invoke("project:gitStatus", payload),
+    gitInfo: (payload) => ipcRenderer.invoke("project:gitInfo", payload),
+    gitChanges: (payload) => ipcRenderer.invoke("project:gitChanges", payload),
+    gitDiff: (payload) => ipcRenderer.invoke("project:gitDiff", payload),
+    gitFileDiff: (payload) => ipcRenderer.invoke("project:gitFileDiff", payload),
+    gitStage: (payload) => ipcRenderer.invoke("project:gitStage", payload),
+    gitUnstage: (payload) => ipcRenderer.invoke("project:gitUnstage", payload),
+    gitDiscard: (payload) => ipcRenderer.invoke("project:gitDiscard", payload),
+    gitCommit: (payload) => ipcRenderer.invoke("project:gitCommit", payload),
     searchFiles: (payload) => ipcRenderer.invoke("project:searchFiles", payload),
     searchContent: (payload) => ipcRenderer.invoke("project:searchContent", payload),
     replaceContent: (payload) => ipcRenderer.invoke("project:replaceContent", payload),
@@ -149,12 +196,22 @@ contextBridge.exposeInMainWorld("xcoding", {
   settings: {
     get: () => ipcRenderer.invoke("settings:get"),
     setLanguage: (language) => ipcRenderer.invoke("settings:setLanguage", { language }),
+    setTheme: (theme) => ipcRenderer.invoke("settings:setTheme", { theme }),
+    setThemePack: (id) => ipcRenderer.invoke("settings:setThemePack", { id }),
     setAutoApply: (enabled) => ipcRenderer.invoke("settings:setAutoApply", { enabled }),
     setAiConfig: (payload) => ipcRenderer.invoke("settings:setAiConfig", payload),
     setLayout: (payload) => ipcRenderer.invoke("settings:setLayout", payload)
   },
+  themes: {
+    list: () => ipcRenderer.invoke("themes:list"),
+    getResolved: (id) => ipcRenderer.invoke("themes:getResolved", { id }),
+    openDir: () => ipcRenderer.invoke("themes:openDir"),
+    openThemeDir: (id) => ipcRenderer.invoke("themes:openThemeDir", { id }),
+    importZip: () => ipcRenderer.invoke("themes:importZip")
+  },
   os: {
-    copyText: (text) => ipcRenderer.invoke("os:copyText", { text })
+    copyText: (text) => ipcRenderer.invoke("os:copyText", { text }),
+    openExternal: (url) => ipcRenderer.invoke("os:openExternal", { url })
   },
   // window controls are defined above under xcoding.window
 });

@@ -25,9 +25,55 @@ declare global {
         hide: (payload: { previewId: string }) => Promise<{ ok: boolean; reason?: string }>;
         setBounds: (payload: { previewId: string; bounds: { x: number; y: number; width: number; height: number } }) => Promise<{ ok: boolean; reason?: string }>;
         navigate: (payload: { previewId: string; url: string }) => Promise<{ ok: boolean; reason?: string }>;
+        reload: (payload: { previewId: string }) => Promise<{ ok: boolean; reason?: string }>;
         destroy: (payload: { previewId: string }) => Promise<{ ok: boolean; reason?: string }>;
+        setPreserveLog: (payload: { previewId: string; preserveLog: boolean }) => Promise<{ ok: boolean; reason?: string }>;
+        setEmulation: (payload: { previewId: string; mode: "desktop" | "phone" | "tablet" }) => Promise<{ ok: boolean; reason?: string }>;
+        networkGetEntry: (payload: { previewId: string; requestId: string }) => Promise<
+          | {
+              ok: true;
+              entry: {
+                requestId: string;
+                url: string;
+                method: string;
+                type: string;
+                status: number;
+                statusText: string;
+                mimeType: string;
+                startedAt: number;
+                finishedAt: number;
+                durationMs: number;
+                sizeBytes: number;
+                errorText: string;
+                requestHeaders: Record<string, string>;
+                requestPostData: string;
+                responseHeaders: Record<string, string>;
+              };
+            }
+          | { ok: false; reason: string }
+        >;
+        networkGetResponseBody: (payload: { previewId: string; requestId: string }) => Promise<
+          | { ok: true; body: string; base64Encoded: boolean; sizeBytes: number; mimeType: string }
+          | { ok: false; reason: string; sizeBytes?: number }
+        >;
+        networkBuildCurl: (payload: { previewId: string; requestId: string }) => Promise<{ ok: true; curl: string } | { ok: false; reason: string }>;
+        networkClearBrowserCache: (payload: { previewId: string }) => Promise<{ ok: boolean; reason?: string }>;
         onConsole: (listener: (payload: { previewId: string; level: string; text: string; timestamp: number }) => void) => () => void;
-        onNetwork: (listener: (payload: { previewId: string; requestId: string; url: string; status: number; method: string; timestamp: number }) => void) => () => void;
+        onNetwork: (
+          listener: (payload: {
+            previewId: string;
+            requestId: string;
+            url: string;
+            status: number;
+            method: string;
+            type: string;
+            timestamp: number;
+            durationMs: number | null;
+            sizeBytes: number | null;
+            errorText: string | null;
+          }) => void
+        ) => () => void;
+        onResetLogs: (listener: (payload: { previewId: string }) => void) => () => void;
       };
       projects: {
         get: () => Promise<{
@@ -44,19 +90,19 @@ declare global {
                 name: string;
                 lastOpenedAt: number;
                 uiLayout?: { explorerWidth: number; chatWidth: number; isExplorerVisible: boolean; isChatVisible: boolean };
-                workflow?: { stage: "idea" | "auto" | "preview" | "develop"; lastUpdatedAt?: number };
+                workflow?: { stage: "idea" | "auto" | "preview" | "develop" | "review"; lastUpdatedAt?: number };
               }
             >;
           };
         }>;
         getWorkflow: (projectId: string) => Promise<{
           ok: boolean;
-          workflow?: { stage: "idea" | "auto" | "preview" | "develop"; lastUpdatedAt?: number };
+          workflow?: { stage: "idea" | "auto" | "preview" | "develop" | "review"; lastUpdatedAt?: number };
           reason?: string;
         }>;
         setWorkflow: (
           projectId: string,
-          workflow: Partial<{ stage: "idea" | "auto" | "preview" | "develop"; lastUpdatedAt?: number }>
+          workflow: Partial<{ stage: "idea" | "auto" | "preview" | "develop" | "review"; lastUpdatedAt?: number }>
         ) => Promise<{ ok: boolean; reason?: string }>;
         setSlotPath: (slot: number, projectPath: string) => Promise<{ ok: boolean; projectId?: string; reason?: string }>;
         bindCwd: (slot: number) => Promise<{ ok: boolean; projectId?: string; reason?: string }>;
@@ -83,7 +129,7 @@ declare global {
                   name: string;
                   lastOpenedAt: number;
                   uiLayout?: { explorerWidth: number; chatWidth: number; isExplorerVisible: boolean; isChatVisible: boolean };
-                  workflow?: { stage: "idea" | "auto" | "preview" | "develop"; lastUpdatedAt?: number };
+                  workflow?: { stage: "idea" | "auto" | "preview" | "develop" | "review"; lastUpdatedAt?: number };
                 }
               >;
             };
@@ -146,6 +192,15 @@ declare global {
         turnInterrupt: (payload: any) => Promise<{ ok: boolean; result?: any; reason?: string }>;
         turnRevert: (payload: { threadId: string; turnId: string }) => Promise<{ ok: boolean; reason?: string }>;
         turnApply: (payload: { threadId: string; turnId: string }) => Promise<{ ok: boolean; reason?: string }>;
+        turnFileDiff: (payload: {
+          threadId: string;
+          turnId: string;
+          path: string;
+          maxBytes?: number;
+        }) => Promise<
+          | { ok: true; original: string; modified: string; truncated: boolean; isBinary: boolean }
+          | { ok: false; reason: string }
+        >;
         reviewStart: (payload: any) => Promise<{ ok: boolean; result?: any; reason?: string }>;
         modelList: (payload?: any) => Promise<{ ok: boolean; result?: any; reason?: string }>;
         skillsList: (payload?: any) => Promise<{ ok: boolean; result?: any; reason?: string }>;
@@ -154,6 +209,63 @@ declare global {
         configValueWrite: (payload: any) => Promise<{ ok: boolean; result?: any; reason?: string }>;
         restart: () => Promise<{ ok: boolean; reason?: string }>;
         respond: (payload: { id: number; result?: any; error?: any }) => Promise<{ ok: boolean; reason?: string }>;
+        onEvent: (listener: (payload: any) => void) => () => void;
+        onRequest: (listener: (payload: any) => void) => () => void;
+      };
+      claude: {
+        ensureStarted: (payload: {
+          slot: number;
+          projectRootPath?: string;
+          sessionId?: string | null;
+          permissionMode?: string;
+          forkSession?: boolean;
+        }) => Promise<{ ok: boolean; sessionId?: string | null; permissionMode?: string; reason?: string }>;
+        getStatus: (payload: { slot: number }) => Promise<{
+          ok: boolean;
+          status?: { state: "idle" | "starting" | "ready" | "exited" | "error"; error?: string };
+          slot?: number;
+          sessionId?: string | null;
+          permissionMode?: string;
+          reason?: string;
+        }>;
+        sendUserMessage: (payload: { slot: number; content: string }) => Promise<{ ok: boolean; reason?: string }>;
+        interrupt: (payload: { slot: number }) => Promise<{ ok: boolean; reason?: string }>;
+        close: (payload: { slot: number }) => Promise<{ ok: boolean; reason?: string }>;
+        setPermissionMode: (payload: { slot: number; mode: string }) => Promise<{ ok: boolean; reason?: string }>;
+        respondToolPermission: (payload: {
+          requestId: string;
+          behavior: "allow" | "deny";
+          updatedInput?: any;
+          updatedPermissions?: any;
+          interrupt?: boolean;
+        }) => Promise<{ ok: boolean; reason?: string }>;
+        historyList: (payload: { projectRootPath: string }) => Promise<{
+          ok: boolean;
+          sessions?: Array<{ sessionId: string; fileName?: string; updatedAtMs: number; preview?: string }>;
+          reason?: string;
+        }>;
+        sessionRead: (payload: { projectRootPath: string; sessionId: string }) => Promise<{ ok: boolean; thread?: any; reason?: string; debug?: any }>;
+        turnFileDiff: (payload: {
+          projectRootPath: string;
+          sessionId: string;
+          absPath: string;
+        }) => Promise<
+          | { ok: true; original: string; modified: string; backupName?: string; messageId?: string }
+          | { ok: false; reason: string; messageId?: string }
+        >;
+        mcpServerStatus: (payload: { slot: number }) => Promise<{ ok: boolean; servers?: Array<{ name: string; status: string }>; reason?: string }>;
+        forkSession: (payload: { slot: number; projectRootPath: string; sessionId: string; permissionMode?: string }) => Promise<{
+          ok: boolean;
+          sessionId?: string;
+          reason?: string;
+        }>;
+        latestSnapshotFiles: (payload: { projectRootPath: string; sessionId: string }) => Promise<{
+          ok: boolean;
+          files?: Array<{ absPath: string; backupName: string }>;
+          messageId?: string;
+          reason?: string;
+        }>;
+        revertFileFromBackup: (payload: { absPath: string; content: string }) => Promise<{ ok: boolean; reason?: string }>;
         onEvent: (listener: (payload: any) => void) => () => void;
         onRequest: (listener: (payload: any) => void) => () => void;
       };
@@ -171,6 +283,43 @@ declare global {
           entries?: Record<string, string>;
           reason?: string;
         }>;
+        gitInfo: (payload: { slot: number }) => Promise<{
+          ok: boolean;
+          isRepo?: boolean;
+          repoRoot?: string;
+          branch?: string;
+          reason?: string;
+        }>;
+        gitChanges: (payload: { slot: number; maxEntries?: number }) => Promise<{
+          ok: boolean;
+          isRepo?: boolean;
+          repoRoot?: string;
+          branch?: string;
+          staged?: string[];
+          unstaged?: string[];
+          untracked?: string[];
+          conflict?: string[];
+          statusByPath?: Record<string, string>;
+          reason?: string;
+        }>;
+        gitDiff: (payload: { slot: number; path: string; mode: "working" | "staged" }) => Promise<{
+          ok: boolean;
+          diff?: string;
+          truncated?: boolean;
+          reason?: string;
+        }>;
+        gitFileDiff: (payload: { slot: number; path: string; mode: "working" | "staged" }) => Promise<{
+          ok: boolean;
+          original?: string;
+          modified?: string;
+          truncated?: boolean;
+          isBinary?: boolean;
+          reason?: string;
+        }>;
+        gitStage: (payload: { slot: number; paths: string[] }) => Promise<{ ok: boolean; reason?: string }>;
+        gitUnstage: (payload: { slot: number; paths: string[] }) => Promise<{ ok: boolean; reason?: string }>;
+        gitDiscard: (payload: { slot: number; paths: string[]; includeUntracked?: boolean }) => Promise<{ ok: boolean; reason?: string }>;
+        gitCommit: (payload: { slot: number; message: string; amend?: boolean }) => Promise<{ ok: boolean; commitHash?: string; reason?: string }>;
         searchFiles: (payload: { slot: number; query: string; maxResults?: number; useGitignore?: boolean }) => Promise<{
           ok: boolean;
           results?: Array<{ path: string; name: string; relativePath: string; score: number }>;
@@ -242,17 +391,46 @@ declare global {
         get: () => Promise<{
           ui: {
             language: "en-US" | "zh-CN";
+            theme: "dark" | "light";
+            themePackId: string;
             layout?: { explorerWidth: number; chatWidth: number; isExplorerVisible: boolean; isChatVisible: boolean };
           };
           ai: { autoApplyAll: boolean; apiBase: string; apiKey: string; model: string };
         }>;
         setLanguage: (language: "en-US" | "zh-CN") => Promise<{ ok: boolean }>;
+        setTheme: (theme: "dark" | "light") => Promise<{ ok: boolean }>;
+        setThemePack: (id: string) => Promise<{ ok: boolean }>;
         setAutoApply: (enabled: boolean) => Promise<{ ok: boolean }>;
         setAiConfig: (payload: { apiBase: string; apiKey: string; model: string }) => Promise<{ ok: boolean }>;
         setLayout: (payload: { explorerWidth: number; chatWidth: number; isExplorerVisible: boolean; isChatVisible: boolean }) => Promise<{ ok: boolean }>;
       };
+      themes: {
+        list: () => Promise<Array<{ id: string; name: string; appearance: "dark" | "light"; source: "builtin" | "user" }>>;
+        getResolved: (id: string) => Promise<{
+          id: string;
+          name: string;
+          appearance: "dark" | "light";
+          cssVars: Record<string, string>;
+          monacoThemeName: string;
+          monacoThemeData?: {
+            base: "vs" | "vs-dark";
+            inherit: boolean;
+            rules: Array<{ token: string; foreground?: string; background?: string; fontStyle?: string }>;
+            colors: Record<string, string>;
+          };
+          extraCssText?: string;
+        }>;
+        openDir: () => Promise<{ ok: boolean; path: string }>;
+        openThemeDir: (id: string) => Promise<{ ok: boolean; path: string }>;
+        importZip: () => Promise<
+          | { ok: true; canceled: true }
+          | { ok: true; themeId: string; didReplace: boolean }
+          | { ok: false; reason: string; themeId?: string }
+        >;
+      };
       os: {
         copyText: (text: string) => Promise<{ ok: boolean; reason?: string }>;
+        openExternal: (url: string) => Promise<{ ok: boolean; reason?: string }>;
       };
     };
   }

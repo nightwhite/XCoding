@@ -28,6 +28,15 @@ reference
 dist
 helloagents
 
+# Downloaded fonts (generated during install)
+src/renderer/assets/fonts/firacode-nerd-font/*
+!src/renderer/assets/fonts/firacode-nerd-font/version.txt
+
 # Dev-only codex binaries (do not commit)
 assets/codex/bin/**
 !assets/codex/bin/**/.gitkeep
+
+# Generated Claude Code bundle (do not commit)
+assets/claude-code/**
+!assets/claude-code/.gitkeep
+!assets/claude-code/version.txt

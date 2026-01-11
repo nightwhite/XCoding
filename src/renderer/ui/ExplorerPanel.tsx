@@ -11,6 +11,7 @@ type Props = {
   isBound: boolean;
   width?: number;
   onOpenFile: (relPath: string, line?: number, column?: number) => void;
+  onOpenGitDiff?: (relPath: string, mode: "working" | "staged") => void;
   onOpenFolder: () => void;
   onDeletedPaths?: (paths: string[]) => void;
 };
@@ -52,7 +53,7 @@ function parseGlobInput(raw: string): string[] {
     .filter(Boolean);
 }
 
-export default function ExplorerPanel({ slot, projectId, rootPath, isBound, width, onOpenFile, onOpenFolder, onDeletedPaths }: Props) {
+export default function ExplorerPanel({ slot, projectId, rootPath, isBound, width, onOpenFile, onOpenGitDiff, onOpenFolder, onDeletedPaths }: Props) {
   const { t } = useI18n();
   const [activeView, setActiveView] = useState<"explorer" | "search">("explorer");
   const searchInputRef = useRef<HTMLInputElement | null>(null);
@@ -235,7 +236,7 @@ export default function ExplorerPanel({ slot, projectId, rootPath, isBound, widt
 
   return (
     <aside
-      className="flex h-full min-h-0 shrink-0 flex-col border-r border-[var(--vscode-panel-border)] bg-[var(--vscode-sideBar-background)]"
+      className="flex h-full min-h-0 shrink-0 flex-col bg-transparent"
       style={width ? ({ width } as React.CSSProperties) : undefined}
     >
       {!isBound ? (
@@ -252,12 +253,12 @@ export default function ExplorerPanel({ slot, projectId, rootPath, isBound, widt
       ) : null}
 
       {isBound ? (
-        <div ref={searchContainerRef} className="border-b border-[var(--vscode-panel-border)] p-2">
-          <div className="flex items-center gap-2 rounded bg-[var(--vscode-input-background)] px-2 py-1 ring-1 ring-[var(--vscode-input-border)] focus-within:ring-[var(--vscode-focusBorder)]">
+        <div ref={searchContainerRef} className="p-3">
+          <div className="flex items-center gap-2 rounded-md bg-[var(--vscode-input-background)] px-3 py-1.5 ring-1 ring-surface-border focus-within:ring-[var(--vscode-focusBorder)] shadow-sm">
             <Search className="h-4 w-4 shrink-0 text-[var(--vscode-descriptionForeground)]" />
             <input
               ref={searchInputRef}
-              className="min-w-0 flex-1 bg-transparent text-[12px] text-[var(--vscode-input-foreground)] outline-none placeholder:text-[var(--vscode-descriptionForeground)]"
+              className="min-w-0 flex-1 bg-transparent text-[13px] text-[var(--vscode-input-foreground)] outline-none placeholder:text-[var(--vscode-descriptionForeground)]"
               placeholder={search.mode === "files" ? t("searchFilesPlaceholder") : t("searchInFilesPlaceholder")}
               value={search.query}
               onFocus={() => setActiveView("search")}
@@ -319,7 +320,7 @@ export default function ExplorerPanel({ slot, projectId, rootPath, isBound, widt
           </div>
 
           {activeView === "search" ? (
-            <div className="mt-2 flex flex-col gap-2">
+            <div className="mt-3 flex flex-col gap-3">
               <div className="flex items-center justify-between gap-2">
                 <div className="flex items-center gap-1">
                   <button
@@ -463,6 +464,7 @@ export default function ExplorerPanel({ slot, projectId, rootPath, isBound, widt
               rootPath={rootPath}
               isVisible={activeView === "explorer"}
               onOpenFile={(rel) => onOpenFile(rel)}
+              onOpenGitDiff={onOpenGitDiff}
               onDeletedPaths={onDeletedPaths}
             />
           </div>

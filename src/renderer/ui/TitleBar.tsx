@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { messages, useI18n, type Language } from "./i18n";
+import { Settings as SettingsIcon } from "lucide-react";
 import { createPortal } from "react-dom";
 
 type Props = {
@@ -10,14 +11,15 @@ type Props = {
   onSetLanguage?: (language: Language) => void;
   // Back-compat: if onSetLanguage is not provided, fall back to a simple toggle handler.
   onToggleLanguage?: () => void;
+  onOpenSettings?: () => void;
   isExplorerVisible?: boolean;
   isChatVisible?: boolean;
   isTerminalVisible?: boolean;
   onToggleExplorer?: () => void;
   onToggleChat?: () => void;
   onToggleTerminal?: () => void;
-  viewMode?: "develop" | "preview";
-  onViewModeChange?: (mode: "develop" | "preview") => void;
+  viewMode?: "develop" | "preview" | "review";
+  onViewModeChange?: (mode: "develop" | "preview" | "review") => void;
   showExplorerToggle?: boolean;
 };
 
@@ -116,6 +118,7 @@ export default function TitleBar({
   language,
   onSetLanguage,
   onToggleLanguage,
+  onOpenSettings,
   isExplorerVisible,
   isChatVisible,
   isTerminalVisible,
@@ -200,22 +203,38 @@ export default function TitleBar({
     setLanguageMenuOpen(false);
   }, [currentLanguage]);
 
+  useEffect(() => {
+    const onDismissOverlays = () => setLanguageMenuOpen(false);
+    window.addEventListener("xcoding:dismissOverlays", onDismissOverlays as any);
+    return () => window.removeEventListener("xcoding:dismissOverlays", onDismissOverlays as any);
+  }, []);
+
   return (
     <div
-      className="flex h-10 items-center justify-between border-b border-[var(--vscode-panel-border)] bg-[var(--vscode-titleBar-activeBackground)] px-2 text-xs text-[var(--vscode-titleBar-activeForeground)]"
+      className="flex h-12 items-center justify-between bg-[var(--vscode-titleBar-activeBackground)] backdrop-blur-sm px-4 text-xs text-[var(--vscode-titleBar-activeForeground)] transition-colors duration-300"
       style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
     >
-      <div className="flex min-w-0 items-center gap-2">
-        {isMac ? null : <div className="min-w-0 truncate text-[11px] text-[var(--vscode-titleBar-activeForeground)]">{effectiveTitle}</div>}
+      <div className="flex min-w-0 items-center gap-3">
+        {/* Modern App Logo & Title */}
+        <div className="flex items-center gap-2 select-none opacity-90 hover:opacity-100 transition-opacity">
+	           {!isMac && (
+	             <div className="flex items-baseline gap-2">
+	               <span className="font-bold tracking-tight text-sm text-[var(--vscode-titleBar-activeForeground)] font-mono">{effectiveTitle}</span>
+	               <span className="rounded bg-[var(--vscode-toolbar-hoverBackground)] px-1.5 py-0.5 text-[9px] font-semibold text-[var(--vscode-descriptionForeground)]">BETA</span>
+	             </div>
+	           )}
+	        </div>
       </div>
 
-      <div className="flex min-w-0 flex-1 items-center justify-center px-2">
-        <div className="min-w-0 truncate text-[11px] font-medium text-[var(--vscode-titleBar-activeForeground)]">
-          {centerTitle ?? ""}
-        </div>
+      <div className="flex min-w-0 flex-1 items-center justify-center px-4">
+        {centerTitle && (
+           <span className="min-w-0 truncate text-xs font-medium text-[var(--vscode-titleBar-activeForeground)] opacity-80">
+            {centerTitle}
+          </span>
+        )}
       </div>
 
-      <div className="flex items-center gap-1" style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}>
+      <div className="flex items-center gap-2" style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}>
         {onViewModeChange && viewMode ? (
           <div className="mr-1 flex items-center rounded border border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)] p-0.5">
             <button
@@ -244,6 +263,19 @@ export default function TitleBar({
             >
               {t("preview")}
             </button>
+            <button
+              className={[
+                "rounded px-2 py-1 text-[11px]",
+                viewMode === "review"
+                  ? "bg-[var(--vscode-button-secondaryBackground)] text-[var(--vscode-button-secondaryForeground)]"
+                  : "text-[var(--vscode-descriptionForeground)] hover:bg-[var(--vscode-toolbar-hoverBackground)] hover:text-[var(--vscode-foreground)]"
+              ].join(" ")}
+              onClick={() => onViewModeChange("review")}
+              type="button"
+              title={t("reviewMode")}
+            >
+              {t("review")}
+            </button>
           </div>
         ) : null}
 
@@ -258,6 +290,11 @@ export default function TitleBar({
         <ToolbarButton title={t("toggleTerminal")} onClick={onToggleTerminal} active={Boolean(isTerminalVisible)}>
           <IconTerminal active={Boolean(isTerminalVisible)} />
         </ToolbarButton>
+        {onOpenSettings ? (
+          <ToolbarButton title={t("ideSettings")} onClick={onOpenSettings}>
+            <SettingsIcon className="h-4 w-4" />
+          </ToolbarButton>
+        ) : null}
         {canShowLanguageMenu ? (
           <>
             <ToolbarButton
@@ -345,31 +382,31 @@ export default function TitleBar({
           </>
         ) : null}
 
-        {showCustomButtons ? (
-          <div className="ml-2 flex items-stretch overflow-hidden rounded border border-[var(--vscode-panel-border)]">
-            <button
-              className="flex h-7 w-10 items-center justify-center text-[12px] hover:bg-[var(--vscode-toolbar-hoverBackground)]"
-              onClick={() => void window.xcoding.window.minimize()}
-              title={t("windowMinimize")}
-              type="button"
-            >
-              —
-            </button>
-            <button
-              className="flex h-7 w-10 items-center justify-center text-[12px] hover:bg-[var(--vscode-toolbar-hoverBackground)]"
-              onClick={() => void window.xcoding.window.maximizeToggle()}
-              title={t("windowMaximize")}
-              type="button"
-            >
-              {isWindows ? "▢" : "⬜"}
-            </button>
-            <button
-              className="flex h-7 w-10 items-center justify-center text-[12px] hover:bg-red-500/80 hover:text-white"
-              onClick={() => void window.xcoding.window.close()}
-              title={t("windowClose")}
-              type="button"
-            >
-              ✕
+	        {showCustomButtons ? (
+	          <div className="ml-3 flex items-center gap-1">
+	            <button
+	              className="flex h-7 w-7 items-center justify-center rounded-full text-[var(--vscode-titleBar-activeForeground)] opacity-70 hover:bg-[var(--vscode-toolbar-hoverBackground)] hover:opacity-100 transition-colors"
+	              onClick={() => void window.xcoding.window.minimize()}
+	              title={t("windowMinimize")}
+	              type="button"
+	            >
+              <svg width="10" height="1" viewBox="0 0 10 1" fill="currentColor"><rect width="10" height="1" rx="0.5"/></svg>
+	            </button>
+	            <button
+	              className="flex h-7 w-7 items-center justify-center rounded-full text-[var(--vscode-titleBar-activeForeground)] opacity-70 hover:bg-[var(--vscode-toolbar-hoverBackground)] hover:opacity-100 transition-colors"
+	              onClick={() => void window.xcoding.window.maximizeToggle()}
+	              title={t("windowMaximize")}
+	              type="button"
+	            >
+              <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2"><rect x="1.5" y="1.5" width="7" height="7" rx="1"/></svg>
+	            </button>
+	            <button
+	              className="flex h-7 w-7 items-center justify-center rounded-full text-[var(--vscode-titleBar-activeForeground)] opacity-70 hover:bg-red-500/90 hover:text-white hover:opacity-100 transition-colors"
+	              onClick={() => void window.xcoding.window.close()}
+	              title={t("windowClose")}
+	              type="button"
+	            >
+              <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"><path d="M2 2l6 6M8 2l-6 6"/></svg>
             </button>
           </div>
         ) : null}

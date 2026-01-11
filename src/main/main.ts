@@ -18,6 +18,7 @@ import { setupIpc } from "./ipc";
 import { disposeAllTerminals } from "./managers/terminalManager";
 import { getProjectForSlot, loadProjectsFromDisk, projectsState } from "./stores/projectsStore";
 import { loadSettingsFromDisk, settings } from "./stores/settingsStore";
+import { disposeAllClaudeSync } from "./claude/claudeManager";
 
 const APP_NAME = "XCoding";
 app.name = APP_NAME;
@@ -26,6 +27,10 @@ try {
 } catch {
   // ignore
 }
+
+// In dev, Electron prints security warnings for any renderer that loads a page without CSP
+// (e.g. BrowserView previewing arbitrary websites). These warnings do not appear once packaged.
+if (!app.isPackaged) process.env.ELECTRON_DISABLE_SECURITY_WARNINGS = "true";
 
 const DEV_SERVER_URL = "http://127.0.0.1:5173";
 
@@ -39,7 +44,7 @@ if (!gotSingleInstanceLock) {
   app.on("second-instance", () => {
     // Someone tried to run a second instance, create another window in the same process.
     // This preserves the "only one codex app-server" invariant while supporting multi-window UX.
-    const win = createWindow({ devServerUrl: DEV_SERVER_URL, onLastWindowClosed: disposeCodexBridgeForUiGone });
+    const win = createWindow({ devServerUrl: DEV_SERVER_URL, onLastWindowClosed: onLastWindowClosedCleanup });
     try {
       win.show();
       win.focus();
@@ -51,12 +56,30 @@ if (!gotSingleInstanceLock) {
 
 // Best-effort: try to terminate codex app-server on abnormal exits too.
 // This cannot help when the OS force-kills the process, but reduces orphaning in most cases.
-process.on("SIGINT", () => disposeCodexBridge("SIGINT"));
-process.on("SIGTERM", () => disposeCodexBridge("SIGTERM"));
-process.on("beforeExit", () => disposeCodexBridge("beforeExit"));
-process.on("exit", () => disposeCodexBridge("exit"));
-process.on("uncaughtException", () => disposeCodexBridge("uncaughtException"));
-process.on("unhandledRejection", () => disposeCodexBridge("unhandledRejection"));
+process.on("SIGINT", () => {
+  disposeCodexBridge("SIGINT");
+  disposeAllClaudeSync("SIGINT");
+});
+process.on("SIGTERM", () => {
+  disposeCodexBridge("SIGTERM");
+  disposeAllClaudeSync("SIGTERM");
+});
+process.on("beforeExit", () => {
+  disposeCodexBridge("beforeExit");
+  disposeAllClaudeSync("beforeExit");
+});
+process.on("exit", () => {
+  disposeCodexBridge("exit");
+  disposeAllClaudeSync("exit");
+});
+process.on("uncaughtException", () => {
+  disposeCodexBridge("uncaughtException");
+  disposeAllClaudeSync("uncaughtException");
+});
+process.on("unhandledRejection", () => {
+  disposeCodexBridge("unhandledRejection");
+  disposeAllClaudeSync("unhandledRejection");
+});
 
 // macOS menu title & About panel title
 if (process.platform === "darwin") {
@@ -87,6 +110,11 @@ function getVisibleBoundSlotsForWindow(windowId: number): number[] {
 
   const detached = new Set(listDetachedSlots());
   return boundSlots.filter((slot) => !detached.has(slot));
+}
+
+function onLastWindowClosedCleanup() {
+  disposeCodexBridgeForUiGone();
+  disposeAllClaudeSync("ui-gone");
 }
 
 async function setActiveSlotForWindow(windowId: number, slot: number) {
@@ -155,12 +183,12 @@ app.whenReady().then(() => {
 
   loadSettingsFromDisk();
   loadProjectsFromDisk();
-  const win = createWindow({ devServerUrl: DEV_SERVER_URL, onLastWindowClosed: disposeCodexBridgeForUiGone });
+  const win = createWindow({ devServerUrl: DEV_SERVER_URL, onLastWindowClosed: onLastWindowClosedCleanup });
   void setActiveSlotForWindow(win.id, activeSlotByWindowId.get(win.id) ?? 1);
   setupAppMenu(APP_NAME, settings.ui.language);
   setupIpc({
     devServerUrl: DEV_SERVER_URL,
-    onLastWindowClosed: disposeCodexBridgeForUiGone,
+    onLastWindowClosed: onLastWindowClosedCleanup,
     onLanguageChanged: (language) => setupAppMenu(APP_NAME, language),
     setActiveSlotForWindow
   });
@@ -176,7 +204,7 @@ app.whenReady().then(() => {
   }
 
   app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow({ devServerUrl: DEV_SERVER_URL, onLastWindowClosed: disposeCodexBridgeForUiGone });
+    if (BrowserWindow.getAllWindows().length === 0) createWindow({ devServerUrl: DEV_SERVER_URL, onLastWindowClosed: onLastWindowClosedCleanup });
   });
 });
 
@@ -189,4 +217,5 @@ app.on("will-quit", () => {
   disposeAllTerminals();
 
   disposeCodexBridgeForUiGone();
+  disposeAllClaudeSync("will-quit");
 });
