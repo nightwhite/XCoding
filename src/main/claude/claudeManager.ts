@@ -5,6 +5,7 @@ import type { AccountInfo, ModelInfo, Query, SlashCommand } from "@anthropic-ai/
 import { resolveBundledClaudeCode } from "./claudeExecutable";
 import { computeProposedDiffPreview, type ProposedDiffPreview } from "./diff/proposedDiffPreview";
 import type { ChildProcess } from "node:child_process";
+import { homedir } from "node:os";
 import path from "node:path";
 import { resolveRunAsNodeExecutablePath } from "../shared/runAsNodeExecutable";
 
@@ -290,6 +291,34 @@ function isWriteToolName(toolName: unknown): toolName is "Write" | "Edit" | "Mul
   return name === "Write" || name === "Edit" || name === "MultiEdit";
 }
 
+function sanitizeShellEnv(env: Record<string, string>) {
+  // nvm warns (and can refuse to work) when npm_config_prefix is set (often set by pnpm global prefix).
+  delete env.npm_config_prefix;
+  delete env.NPM_CONFIG_PREFIX;
+  return env;
+}
+
+function getEnhancedPath(currentPath: string | undefined): string {
+  const home = process.env.HOME || process.env.USERPROFILE || homedir();
+  if (process.platform === "win32") return currentPath || "";
+
+  const additionalPaths = [
+    "/usr/local/bin",
+    "/opt/homebrew/bin",
+    "/opt/homebrew/sbin",
+    path.join(home, "Library", "pnpm"),
+    path.join(home, ".local", "share", "pnpm"),
+    path.join(home, ".local", "bin"),
+    path.join(home, ".cargo", "bin"),
+    path.join(home, ".bun", "bin"),
+    path.join(home, ".npm-global", "bin"),
+    path.join(home, ".nvm", "versions", "node", "current", "bin")
+  ];
+
+  const merged = Array.from(new Set([currentPath || "", ...additionalPaths].filter(Boolean))).join(path.delimiter);
+  return merged || currentPath || "";
+}
+
 function cliEnvBase() {
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) {
@@ -314,8 +343,11 @@ function spawnClaudeCodeProcessForSlot(slot: number) {
 
     const { spawn } = require("node:child_process") as typeof import("node:child_process");
     const execPath = resolveRunAsNodeExecutablePath();
-    const env = { ...cliEnvBase(), ...(options?.env ?? {}) };
+    const env = sanitizeShellEnv({ ...cliEnvBase(), ...(options?.env ?? {}) });
     delete env.NODE_OPTIONS;
+    env.PATH = getEnhancedPath(env.PATH);
+    env.LANG = env.LANG || "en_US.UTF-8";
+    env.LC_ALL = env.LC_ALL || env.LANG || "en_US.UTF-8";
     env.ELECTRON_RUN_AS_NODE = "1";
     const cwd = typeof options?.cwd === "string" && options.cwd ? options.cwd : process.cwd();
     let args = Array.isArray(options?.args) ? options.args : [];
