@@ -220,6 +220,15 @@ declare global {
           permissionMode?: string;
           forkSession?: boolean;
         }) => Promise<{ ok: boolean; sessionId?: string | null; permissionMode?: string; reason?: string }>;
+        send: (payload: {
+          slot: number;
+          projectRootPath: string;
+          sessionId?: string | null;
+          permissionMode?: string;
+          forkSession?: boolean;
+          content: any;
+          isSynthetic?: boolean;
+        }) => Promise<{ ok: boolean; sessionId?: string | null; permissionMode?: string; reason?: string }>;
         supportedCommands: (payload: {
           slot: number;
           projectRootPath: string;
@@ -266,7 +275,15 @@ declare global {
           permissionMode?: string;
           reason?: string;
         }>;
-        sendUserMessage: (payload: { slot: number; content: unknown; isSynthetic?: boolean }) => Promise<{ ok: boolean; reason?: string }>;
+        sendUserMessage: (payload: {
+          slot: number;
+          content: unknown;
+          isSynthetic?: boolean;
+          projectRootPath?: string;
+          sessionId?: string | null;
+          permissionMode?: string;
+          forkSession?: boolean;
+        }) => Promise<{ ok: boolean; reason?: string; sessionId?: string | null; permissionMode?: string }>;
         interrupt: (payload: { slot: number }) => Promise<{ ok: boolean; reason?: string }>;
         close: (payload: { slot: number }) => Promise<{ ok: boolean; reason?: string }>;
         setPermissionMode: (payload: { slot: number; mode: string }) => Promise<{ ok: boolean; reason?: string }>;
@@ -333,6 +350,15 @@ declare global {
         listDir: (payload: { slot: number; dir: string }) => Promise<{
           ok: boolean;
           entries?: Array<{ name: string; kind: "dir" | "file"; ignored?: boolean }>;
+          reason?: string;
+        }>;
+        stat: (payload: { slot: number; path: string }) => Promise<{
+          ok: boolean;
+          exists?: boolean;
+          isFile?: boolean;
+          isDirectory?: boolean;
+          size?: number;
+          mtimeMs?: number;
           reason?: string;
         }>;
         searchPaths: (payload: { slot: number; query: string; limit?: number }) => Promise<{ ok: boolean; results?: string[]; reason?: string }>;

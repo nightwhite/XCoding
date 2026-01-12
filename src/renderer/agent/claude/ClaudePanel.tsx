@@ -150,10 +150,17 @@ function coerceNonEmptyString(value: unknown): string | null {
   return trimmed ? trimmed : null;
 }
 
+function isUnhelpfulHistoryMarkerLine(text: string) {
+  const t = String(text || "").trim().toLowerCase();
+  if (!t) return true;
+  if (t === "no response requested.") return true;
+  if (t === "[request interrupted by user]") return true;
+  return false;
+}
+
 export default function ClaudePanel({ slot, projectRootPath, onOpenUrl, onOpenFile, onOpenTerminalAndRun, isActive }: Props) {
   const { t } = useI18n();
   const isDev = Boolean((import.meta as any)?.env?.DEV);
-  const isPanelActive = isActive !== false;
   const [version, setVersion] = useState(0);
   const [mode, setMode] = useState<ClaudePermissionMode>("default");
   const [input, setInput] = useState("");
@@ -163,6 +170,7 @@ export default function ClaudePanel({ slot, projectRootPath, onOpenUrl, onOpenFi
   const [historyQuery, setHistoryQuery] = useState("");
   const [historySessions, setHistorySessions] = useState<Array<{ sessionId: string; updatedAtMs: number; preview?: string }>>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const interruptedDraftBySessionIdRef = useRef<Map<string, ClaudeUiMessage[]>>(new Map());
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [diffSessionId, setDiffSessionId] = useState<string | null>(null);
   const [isDiffPanelOpen, setIsDiffPanelOpen] = useState(false);
@@ -185,6 +193,9 @@ export default function ClaudePanel({ slot, projectRootPath, onOpenUrl, onOpenFi
   const storeRef = useRef<ClaudeStore>(createClaudeStore());
   const scheduledRafRef = useRef<number | null>(null);
   const hydratedModeRef = useRef(false);
+  const lastClaudeStreamAtRef = useRef<number>(0);
+  const pendingStreamEventsRef = useRef<any[]>([]);
+  const streamFlushTimerRef = useRef<number | null>(null);
   const [openById, setOpenById] = useState<Record<string, boolean>>({});
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const isNearBottomRef = useRef(true);
@@ -346,6 +357,23 @@ export default function ClaudePanel({ slot, projectRootPath, onOpenUrl, onOpenFi
   }, [projectKey, projectRootPath]);
 
   useEffect(() => {
+    const flushStreamEvents = () => {
+      if (streamFlushTimerRef.current !== null) {
+        window.clearTimeout(streamFlushTimerRef.current);
+        streamFlushTimerRef.current = null;
+      }
+      const batch = pendingStreamEventsRef.current;
+      if (!batch.length) return;
+      pendingStreamEventsRef.current = [];
+      for (const ev of batch) applyClaudeStreamEvent(storeRef.current, ev);
+      bump();
+    };
+
+    const scheduleStreamFlush = (delayMs: number) => {
+      if (streamFlushTimerRef.current !== null) return;
+      streamFlushTimerRef.current = window.setTimeout(flushStreamEvents, Math.max(0, delayMs));
+    };
+
     const offEvent = window.xcoding.claude.onEvent((payload: any) => {
       const env = payload as ClaudeEventEnvelope;
       if (env?.slot !== slot) return;
@@ -375,6 +403,7 @@ export default function ClaudePanel({ slot, projectRootPath, onOpenUrl, onOpenFi
       }
       if (env.kind === "stream") {
         const ev = env.event;
+        lastClaudeStreamAtRef.current = Date.now();
         if (ev && typeof ev === "object" && (ev as any).type === "auth_status") {
           const next = {
             isAuthenticating: Boolean((ev as any).isAuthenticating),
@@ -389,13 +418,22 @@ export default function ClaudePanel({ slot, projectRootPath, onOpenUrl, onOpenFi
         if (ev && typeof ev === "object" && (ev as any).type === "system" && (ev as any).subtype === "init") {
           const model = typeof (ev as any).model === "string" ? String((ev as any).model) : "";
           if (model) setCurrentModel(model);
+          const sid = typeof (ev as any).session_id === "string" ? String((ev as any).session_id) : "";
+          if (sid) setDiffSessionId(sid);
         }
         const normalized = ev && typeof ev === "object" && (ev as any).type === "stream_event" && (ev as any).event ? (ev as any).event : ev;
         const evType = normalized && typeof normalized === "object" ? String((normalized as any).type ?? "") : "";
         if (evType === "message_start" || evType === "tool_progress") setIsTurnInProgress(true);
         if (evType === "result") setIsTurnInProgress(false);
-        applyClaudeStreamEvent(storeRef.current, ev);
-        shouldBump = true;
+        // Reduce UI churn on long outputs: batch stream events and render at most every 100ms.
+        // Keep key lifecycle transitions effectively immediate.
+        pendingStreamEventsRef.current.push(ev);
+        if (evType === "message_start" || evType === "result") {
+          flushStreamEvents();
+        } else {
+          scheduleStreamFlush(100);
+        }
+        shouldBump = false;
       }
       if (shouldBump) bump();
     });
@@ -456,16 +494,14 @@ export default function ClaudePanel({ slot, projectRootPath, onOpenUrl, onOpenFi
       bump();
     });
     return () => {
+      if (streamFlushTimerRef.current !== null) {
+        window.clearTimeout(streamFlushTimerRef.current);
+        streamFlushTimerRef.current = null;
+      }
       offEvent();
       offReq();
     };
   }, [bump, isDev, slot]);
-
-  useEffect(() => {
-    if (!isPanelActive) return;
-    if (!projectRootPath || !projectRootPath.trim()) return;
-    void ensureStartedAndSyncSession({ projectRootPath, permissionMode: mode });
-  }, [ensureStartedAndSyncSession, isPanelActive, mode, projectRootPath]);
 
   const refreshHistory = useCallback(async () => {
     if (!projectRootPath) return;
@@ -507,11 +543,35 @@ export default function ClaudePanel({ slot, projectRootPath, onOpenUrl, onOpenFi
   const loadHistorySession = useCallback(
     async (sessionId: string) => {
       if (!projectRootPath) return;
+      const targetSessionId = String(sessionId ?? "").trim();
+      if (!targetSessionId) return;
       setHistoryLoading(true);
       try {
+        const cached = interruptedDraftBySessionIdRef.current.get(targetSessionId);
+        if (cached && cached.length) {
+          const cachedAssistantChars = cached
+            .filter((m) => m.role === "assistant" && typeof m.text === "string")
+            .reduce((sum, m) => sum + String(m.text).length, 0);
+          if (cachedAssistantChars > 0) {
+            storeRef.current.messages = cached.map((m) => ({
+              ...m,
+              meta: { ...(m.meta as any), restoredFromInterruptedDraft: true }
+            }));
+            setDiffSessionId(targetSessionId);
+            setDiffFiles([]);
+            setDiffQuery("");
+            setDiffStats({});
+            setDiffSelectedAbsPath("");
+            setIsTurnInProgress(false);
+            bump();
+            setIsHistoryOpen(false);
+            return;
+          }
+        }
+
         // Read history first so the UI isn't blocked by resume/startup.
         const res = await Promise.race<ClaudeSessionReadResult>([
-          window.xcoding.claude.sessionRead({ projectRootPath, sessionId }),
+          window.xcoding.claude.sessionRead({ projectRootPath, sessionId: targetSessionId }),
           new Promise<ClaudeSessionReadResult>((resolve) => setTimeout(() => resolve({ ok: false, reason: "sessionRead_timeout" }), 8000))
         ]);
         if (!res?.ok || !res.thread?.turns) {
@@ -558,6 +618,10 @@ export default function ClaudePanel({ slot, projectRootPath, onOpenUrl, onOpenFi
           if (turn.user?.text) {
             const rawText = String(turn.user.text);
             const decoded = extractTrailingAtMentionBodies(rawText);
+            if (isUnhelpfulHistoryMarkerLine(decoded.visibleText)) {
+              // Do not render CLI status marker as a standalone "message" row.
+              continue;
+            }
             const meta: any = { uuid: turn.user?.uuid };
             if (decoded.bodies.length) meta.attachedFiles = decoded.bodies;
             storeRef.current.messages.push({ id: `hu-${turn.id}`, role: "user", text: decoded.visibleText, meta });
@@ -572,6 +636,21 @@ export default function ClaudePanel({ slot, projectRootPath, onOpenUrl, onOpenFi
             });
           if (turn.assistant?.text) added += 1;
         }
+        if (cached && cached.length) {
+          // Prefer the cached draft if it contains more assistant output than what is persisted in jsonl.
+          const cachedAssistantChars = cached
+            .filter((m) => m.role === "assistant" && typeof m.text === "string")
+            .reduce((sum, m) => sum + String(m.text).length, 0);
+          const loadedAssistantChars = storeRef.current.messages
+            .filter((m) => m.role === "assistant" && typeof m.text === "string")
+            .reduce((sum, m) => sum + String(m.text).length, 0);
+          if (cachedAssistantChars > loadedAssistantChars) {
+            storeRef.current.messages = cached.map((m) => ({
+              ...m,
+              meta: { ...(m.meta as any), restoredFromInterruptedDraft: true }
+            }));
+          }
+        }
         if (isDev) {
           storeRef.current.messages.unshift({
             id: `hist-${Date.now()}`,
@@ -579,7 +658,7 @@ export default function ClaudePanel({ slot, projectRootPath, onOpenUrl, onOpenFi
             text: `Loaded history (${added} messages)`
           });
         }
-        setDiffSessionId(sessionId);
+        setDiffSessionId(targetSessionId);
         setDiffFiles([]);
         setDiffQuery("");
         setDiffStats({});
@@ -587,31 +666,13 @@ export default function ClaudePanel({ slot, projectRootPath, onOpenUrl, onOpenFi
         setIsTurnInProgress(false);
         bump();
         setIsHistoryOpen(false);
-
-        // Then try to resume this session in the background. Timeout so UI doesn't get stuck.
-        void (async () => {
-          try {
-            await window.xcoding.claude.close({ slot });
-            await Promise.race([
-              ensureStartedAndSyncSession({ projectRootPath, sessionId, permissionMode: mode }),
-              new Promise((_, reject) => setTimeout(() => reject(new Error("ensureStarted_timeout")), 8000))
-            ]);
-          } catch (e) {
-            storeRef.current.messages.unshift({
-              id: `warn-${Date.now()}`,
-              role: "system",
-              text: `Resume session failed (history is still loaded): ${e instanceof Error ? e.message : String(e)}`
-            });
-            bump();
-          }
-        })();
       } catch (e) {
         pushSystemMessage(`Failed to load session: ${e instanceof Error ? e.message : String(e)}`);
       } finally {
         setHistoryLoading(false);
       }
     },
-    [bump, ensureStartedAndSyncSession, mode, projectRootPath, pushSystemMessage, slot]
+    [bump, isDev, projectRootPath, pushSystemMessage]
   );
 
   const forkHistorySession = useCallback(
@@ -744,6 +805,24 @@ export default function ClaudePanel({ slot, projectRootPath, onOpenUrl, onOpenFi
 
   const stop = useCallback(async () => {
     try {
+      // Flush any pending stream updates before interrupting so the UI doesn't "lose" already received deltas.
+      if (streamFlushTimerRef.current !== null) {
+        window.clearTimeout(streamFlushTimerRef.current);
+        streamFlushTimerRef.current = null;
+      }
+      const batch = pendingStreamEventsRef.current;
+      if (batch.length) {
+        pendingStreamEventsRef.current = [];
+        for (const ev of batch) applyClaudeStreamEvent(storeRef.current, ev);
+        bump();
+      }
+      const sid = typeof diffSessionId === "string" ? diffSessionId.trim() : "";
+      if (sid) {
+        interruptedDraftBySessionIdRef.current.set(
+          sid,
+          storeRef.current.messages.map((m) => ({ ...m, meta: m.meta ? { ...(m.meta as any) } : undefined }))
+        );
+      }
       const res = await window.xcoding.claude.interrupt({ slot });
       if (!res?.ok) pushSystemMessage(`Failed to interrupt: ${String(res?.reason ?? "unknown")}`);
     } catch (e) {
@@ -751,7 +830,7 @@ export default function ClaudePanel({ slot, projectRootPath, onOpenUrl, onOpenFi
     } finally {
       setIsTurnInProgress(false);
     }
-  }, [pushSystemMessage, slot]);
+  }, [diffSessionId, pushSystemMessage, slot]);
 
   const send = useCallback(async () => {
     const text = input.trim();
@@ -773,21 +852,37 @@ export default function ClaudePanel({ slot, projectRootPath, onOpenUrl, onOpenFi
 
     const msg: ClaudeUiMessage = { id: `u-${Date.now()}`, role: "user", text, ...(uniqueFiles.length ? { meta: { attachedFiles: uniqueFiles } } : {}) };
     storeRef.current.messages.push(msg);
+
+    // Match Codex UX: show an immediate "thinking" placeholder so long first-token latency doesn't look frozen.
+    const assistantId = `a-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    storeRef.current.streaming.activeAssistantMessageId = assistantId;
+    storeRef.current.messages.push({ id: assistantId, role: "assistant", text: "", meta: { kind: "thinkingPlaceholder" } });
     bump();
     setInput("");
     setAttachedFiles([]);
     setIsTurnInProgress(true);
     try {
-      const started = await ensureStartedAndSyncSession({ projectRootPath: projectRootPath || "", permissionMode: mode });
-      if (started) {
-        const res = await window.xcoding.claude.sendUserMessage({ slot, content: payloadText });
-        if (!res?.ok) {
-          pushSystemMessage(`Failed to send message: ${String(res?.reason ?? "unknown")}`);
-          setIsTurnInProgress(false);
-        }
-      } else {
+      const beforeStreamAt = lastClaudeStreamAtRef.current;
+      const res = await window.xcoding.claude.sendUserMessage({
+        slot,
+        projectRootPath: projectRootPath || "",
+        sessionId: diffSessionId ?? null,
+        permissionMode: mode,
+        content: payloadText
+      });
+      if (!res?.ok) {
+        pushSystemMessage(`Failed to send message: ${String(res?.reason ?? "unknown")}`);
         setIsTurnInProgress(false);
+        return;
       }
+      const sid = typeof res?.sessionId === "string" ? res.sessionId.trim() : "";
+      if (sid) setDiffSessionId(sid);
+      const inProgressAt = Date.now();
+      window.setTimeout(() => {
+        if (lastClaudeStreamAtRef.current !== beforeStreamAt) return;
+        pushSystemMessage("Claude has not started responding yet (no stream events). Check Claude login/auth status, or try reopening the Claude panel.");
+        if (Date.now() - inProgressAt >= 1900) setIsTurnInProgress(false);
+      }, 2000);
     } catch (e) {
       pushSystemMessage(`Failed to send message: ${e instanceof Error ? e.message : String(e)}`);
       setIsTurnInProgress(false);
@@ -808,7 +903,19 @@ export default function ClaudePanel({ slot, projectRootPath, onOpenUrl, onOpenFi
       bump();
       void refreshHistory();
     }
-  }, [attachedFiles, bump, ensureStartedAndSyncSession, input, mode, projectRootPath, pushSystemMessage, refreshHistory, slot]);
+  }, [
+    attachedFiles,
+    bump,
+    diffSessionId,
+    ensureStartedAndSyncSession,
+    input,
+    isDev,
+    mode,
+    projectRootPath,
+    pushSystemMessage,
+    refreshHistory,
+    slot
+  ]);
 
   const setModeAndPersist = useCallback(
     async (next: ClaudePermissionMode) => {
@@ -910,7 +1017,27 @@ export default function ClaudePanel({ slot, projectRootPath, onOpenUrl, onOpenFi
                 return;
               }
               const parsed = parseRelFileHref(url);
-              if (parsed) onOpenFile(parsed.relPath, parsed.line, parsed.column);
+              if (!parsed) return;
+              void (async () => {
+                try {
+                  const res = await window.xcoding.project.stat({ slot, path: parsed.relPath });
+                  if (!res?.ok) {
+                    pushSystemMessage(`Failed to open path: ${String(res?.reason ?? "stat_failed")}`);
+                    return;
+                  }
+                  if (res.exists === false) {
+                    pushSystemMessage(`Path not found: ${parsed.relPath}`);
+                    return;
+                  }
+                  if (res.isDirectory) {
+                    window.dispatchEvent(new CustomEvent("xcoding:revealInExplorer", { detail: { slot, relPath: parsed.relPath, kind: "dir" } }));
+                    return;
+                  }
+                  onOpenFile(parsed.relPath, parsed.line, parsed.column);
+                } catch (err) {
+                  pushSystemMessage(`Failed to open path: ${err instanceof Error ? err.message : String(err)}`);
+                }
+              })();
             }}
           >
             {children}
@@ -949,7 +1076,7 @@ export default function ClaudePanel({ slot, projectRootPath, onOpenUrl, onOpenFi
       tr: ({ children }: any) => <tr className="align-top">{children}</tr>,
       tbody: ({ children }: any) => <tbody>{children}</tbody>
     };
-  }, [onOpenFile, onOpenUrl]);
+  }, [onOpenFile, onOpenUrl, pushSystemMessage, slot]);
 
   const openSelectedFile = useCallback(() => {
     if (!diffSelectedAbsPath) return;
@@ -1253,33 +1380,6 @@ export default function ClaudePanel({ slot, projectRootPath, onOpenUrl, onOpenFi
     },
     [closeFileMenu, fileMenuMode, input]
   );
-
-  useEffect(() => {
-    // Prefetch Claude meta on panel activation so the command menu matches the official plugin.
-    if (!isPanelActive) return;
-    const root = String(projectRootPath ?? "").trim();
-    if (!root) return;
-    let cancelled = false;
-    void (async () => {
-      await ensureStartedAndSyncSession({ projectRootPath: root, permissionMode: mode });
-      // Align with the official extension: thinking enabled => high maxThinkingTokens.
-      await window.xcoding.claude.setMaxThinkingTokens({ slot, maxThinkingTokens: thinkingEnabled ? 31999 : 0 }).catch(() => {});
-      const [cmds, models, acct] = await Promise.allSettled([
-        window.xcoding.claude.supportedCommands({ slot, projectRootPath: root, permissionMode: mode }),
-        window.xcoding.claude.supportedModels({ slot, projectRootPath: root, permissionMode: mode }),
-        window.xcoding.claude.accountInfo({ slot, projectRootPath: root, permissionMode: mode })
-      ]);
-      if (cancelled) return;
-      if (cmds.status === "fulfilled" && cmds.value?.ok) setSupportedCommands(cmds.value.commands);
-      if (models.status === "fulfilled" && models.value?.ok) setSupportedModels(models.value.models);
-      if (acct.status === "fulfilled" && acct.value?.ok) setAccountInfo(acct.value.accountInfo);
-    })().catch(() => {
-      // ignore
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [ensureStartedAndSyncSession, isPanelActive, mode, projectRootPath, slot, thinkingEnabled]);
 
   const fileSearchQuery = useMemo(() => {
     if (!fileMenuMode || fileMenuMode.kind !== "atToken") return "";
@@ -2035,7 +2135,21 @@ export default function ClaudePanel({ slot, projectRootPath, onOpenUrl, onOpenFi
                 if (m.role === "assistant") {
                   const thinking = typeof meta?.thinking === "string" ? String(meta.thinking) : "";
                   const body = String(m.text ?? "");
-                  if (!body.trim() && !thinking.trim()) return null;
+                  if (!body.trim() && !thinking.trim()) {
+                    const isActiveThinking =
+                      isTurnInProgress &&
+                      storeRef.current.streaming.activeAssistantMessageId &&
+                      String(storeRef.current.streaming.activeAssistantMessageId) === String(m.id);
+                    if (!isActiveThinking) return null;
+                    return (
+                      <div key={m.id} className="my-1 px-2 py-1">
+                        <div className="inline-flex items-center gap-2 text-[12px] text-[var(--vscode-descriptionForeground)]">
+                          <span className="xcoding-codex-dots xcoding-codex-dots-spin xcoding-codex-title-blink" />
+                          <span>Thinking…</span>
+                        </div>
+                      </div>
+                    );
+                  }
                   return (
                     <div key={m.id} className="my-1 px-2 py-1">
                       <div className="text-[13px] leading-[1.095rem] text-[var(--vscode-foreground)]">
@@ -2328,10 +2442,7 @@ export default function ClaudePanel({ slot, projectRootPath, onOpenUrl, onOpenFi
                 onClick={() => (isTurnInProgress ? void stop() : void send())}
                 type="button"
                 title={isTurnInProgress ? t("stop") : t("send")}
-                disabled={
-                  !projectRootPath ||
-                  (isTurnInProgress ? false : String(status?.state ?? "") !== "ready" || (!input.trim() && attachedFiles.length === 0))
-                }
+                disabled={!projectRootPath || (isTurnInProgress ? false : !input.trim() && attachedFiles.length === 0)}
               >
                 {isTurnInProgress ? <Square className="h-4 w-4" /> : "↑"}
               </button>

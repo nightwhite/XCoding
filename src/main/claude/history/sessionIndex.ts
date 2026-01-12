@@ -31,6 +31,15 @@ function extractMessageTextFromContent(content: any): string {
     .join("");
 }
 
+function isUnhelpfulPreviewLine(text: string) {
+  const t = String(text || "").trim().toLowerCase();
+  if (!t) return true;
+  // Claude Code can append synthetic status lines near the end of a session; these make the session list misleading.
+  if (t === "no response requested.") return true;
+  if (t === "[request interrupted by user]") return true;
+  return false;
+}
+
 async function readTailPreview(abs: string): Promise<string> {
   // Performance guardrails: do not read full jsonl files.
   // We read up to the last ~96KB and scan backwards for a useful text message.
@@ -69,7 +78,7 @@ async function readTailPreview(abs: string): Promise<string> {
         const content = msg?.content;
         const messageText = extractMessageTextFromContent(content);
         const oneLine = clampOneLinePreview(messageText, PREVIEW_MAX_LEN);
-        if (oneLine) parsed.push({ type, text: oneLine });
+        if (oneLine && !isUnhelpfulPreviewLine(oneLine)) parsed.push({ type, text: oneLine });
       } catch {
         // ignore bad json line
       }

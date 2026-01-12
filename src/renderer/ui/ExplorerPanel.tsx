@@ -122,6 +122,16 @@ export default function ExplorerPanel({ slot, projectId, rootPath, isBound, widt
   }, [slot]);
 
   useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { slot?: number } | undefined;
+      if (!detail || detail.slot !== slot) return;
+      setActiveView("explorer");
+    };
+    window.addEventListener("xcoding:revealInExplorer", handler as any);
+    return () => window.removeEventListener("xcoding:revealInExplorer", handler as any);
+  }, [slot]);
+
+  useEffect(() => {
     if (!isBound || activeView !== "search") return;
     const q = search.query.trim();
     if (!q) {

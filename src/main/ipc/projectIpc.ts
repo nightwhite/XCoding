@@ -36,6 +36,12 @@ export function registerProjectIpc() {
     return { ok: true, entries: (res.result as any)?.entries ?? [] };
   });
 
+  ipcMain.handle("project:fsStat", async (_event, { slot, path: relPath }: { slot: number; path: string }) => {
+    const res = await forwardToProjectService(slot, { type: "fs:stat", relPath });
+    if (!res.ok) return res;
+    return { ok: true, ...(res.result as any) };
+  });
+
   ipcMain.handle("project:searchPaths", async (_event, { slot, query, limit }: { slot: number; query: string; limit?: number }) => {
     const res = await forwardToProjectService(slot, { type: "fs:searchPaths", query, limit });
     if (!res.ok) return res;

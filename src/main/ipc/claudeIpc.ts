@@ -9,7 +9,7 @@ import {
   getClaudeSupportedModels,
   interruptClaude,
   respondToClaudeToolPermission,
-  sendClaudeUserMessage,
+  runClaudeTurn,
   setClaudeMaxThinkingTokens,
   setClaudeModel,
   setClaudePermissionMode,
@@ -127,8 +127,47 @@ export function registerClaudeIpc() {
       const slot = Number(params?.slot ?? 0);
       const content = params?.content;
       const isSynthetic = params?.isSynthetic === true;
-      const res = await sendClaudeUserMessage({ slot, content, isSynthetic });
-      return res.ok ? { ok: true } : { ok: false, reason: res.reason };
+      if (process.env.XCODING_CLAUDE_DEBUG_MAIN === "1" || process.env.XCODING_CLAUDE_DEBUG) {
+        const kind = typeof content === "string" ? "text" : Array.isArray(content) ? "blocks" : typeof content;
+        const length = typeof content === "string" ? String(content).length : Array.isArray(content) ? content.length : undefined;
+        console.log(`[Claude][slot ${slot}] ipc.sendUserMessage`, { kind, length, isSynthetic });
+      }
+
+      const projectRootPath = typeof params?.projectRootPath === "string" ? String(params.projectRootPath) : "";
+      const sessionId = typeof params?.sessionId === "string" ? params.sessionId : null;
+      const permissionMode = params?.permissionMode as ClaudePermissionMode | undefined;
+      const forkSession = typeof params?.forkSession === "boolean" ? Boolean(params.forkSession) : undefined;
+
+      if (!projectRootPath.trim()) return { ok: false, reason: "missing_projectRootPath" };
+      const res = await runClaudeTurn({ slot, projectRootPath, sessionId, permissionMode, forkSession, content, isSynthetic });
+      if (!res.ok) return { ok: false, reason: res.reason };
+      return { ok: true, sessionId: res.sessionId ?? null, permissionMode: res.permissionMode };
+    } catch (e) {
+      return { ok: false, reason: e instanceof Error ? e.message : "claude_send_failed" };
+    }
+  });
+
+  // Atomic "ensure started + send" to avoid renderer-side races when switching/resuming sessions.
+  ipcMain.handle("claude:send", async (_event, params: any) => {
+    try {
+      const slot = Number(params?.slot ?? 0);
+      const projectRootPath = String(params?.projectRootPath ?? "");
+      if (!projectRootPath) return { ok: false, reason: "missing_projectRootPath" };
+      const sessionId = typeof params?.sessionId === "string" ? params.sessionId : null;
+      const permissionMode = params?.permissionMode as ClaudePermissionMode | undefined;
+      const forkSession = typeof params?.forkSession === "boolean" ? Boolean(params.forkSession) : undefined;
+      const content = params?.content;
+      const isSynthetic = params?.isSynthetic === true;
+
+      if (process.env.XCODING_CLAUDE_DEBUG_MAIN === "1" || process.env.XCODING_CLAUDE_DEBUG) {
+        const kind = typeof content === "string" ? "text" : Array.isArray(content) ? "blocks" : typeof content;
+        const length = typeof content === "string" ? String(content).length : Array.isArray(content) ? content.length : undefined;
+        console.log(`[Claude][slot ${slot}] ipc.send`, { sessionId, permissionMode, forkSession, isSynthetic, kind, length });
+      }
+
+      const res = await runClaudeTurn({ slot, projectRootPath, sessionId, permissionMode, forkSession, content, isSynthetic });
+      if (!res.ok) return { ok: false, reason: res.reason };
+      return { ok: true, sessionId: res.sessionId ?? null, permissionMode: res.permissionMode };
     } catch (e) {
       return { ok: false, reason: e instanceof Error ? e.message : "claude_send_failed" };
     }
